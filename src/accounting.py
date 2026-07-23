@@ -115,6 +115,11 @@ def journal_entry(receipt, category, payment_mode="cash", country="CI", merchant
             f"(attendu : {list(PAYMENT_ACCOUNTS)})"
         )
 
+    # Recu vide (aucun montant exploitable) : on ne construit pas d'ecriture,
+    # mais on NE PLANTE PAS -- une liste vide, is_balanced([]) vaut True.
+    if receipt.total is None and receipt.subtotal is None and receipt.items_sum() is None:
+        return []
+
     total_ttc, tax = _resolve_amounts(receipt)
     recoverable, reason = vat_recoverable(receipt, merchant=merchant)
     recoverable = min(recoverable, tax)   # jamais plus que la taxe reellement lue

@@ -20,7 +20,20 @@ class Receipt:
     @classmethod
     def from_gt_parse(cls, gt_parse, receipt_id=None):
         """Construit un Receipt depuis un JSON CORD OU une sortie Donut.
-        Meme moule pour les deux : c'est ce qui permet de comparer."""
+        Meme moule pour les deux : c'est ce qui permet de comparer.
+
+        NORMALISATION A LA FRONTIERE (bug E8) : token2json peut renvoyer une
+        LISTE a la racine (plusieurs blocs detectes, typique d'une photo
+        inclinee avec du fond), ou n'importe quoi d'autre. On normalise ICI,
+        au point d'entree, une bonne fois -- plutot que de durcir chaque champ
+        localement comme on l'a fait pour menu/sub_total/total. Un recu VIDE
+        sort alors sans exception ; les regles repondront None ("non
+        verifiable"), ce qui est le comportement correct."""
+        if isinstance(gt_parse, list):
+            gt_parse = merge_blocks(gt_parse)      # fusionne les blocs en un seul dict
+        elif not isinstance(gt_parse, dict):
+            gt_parse = {}                          # ni dict ni liste -> recu vide
+
         items = []
         for it in ensure_list(gt_parse.get("menu")):
             if not isinstance(it, dict):
