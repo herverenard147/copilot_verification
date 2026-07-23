@@ -23,6 +23,12 @@ ENV/
 .env.*
 !.env.example
 
+# --- Claude Code / MCP local config (may contain tokens) ---
+.claude.json
+.claude.json.backup
+.mcp.json
+.claude/settings.local.json
+
 # --- Data (large / raw files) ---
 data/*
 !data/.gitkeep
