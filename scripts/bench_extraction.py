@@ -1,22 +1,31 @@
-"""Banc d'essai de l'extraction : le pretraitement aide-t-il vraiment ?
+"""Banc d'essai de l'extraction : 4 configurations par image.
 
-Passe chaque image de test_images/ dans le pipeline, DEUX fois : image brute
-vs image pretraitee (redressement + CLAHE + redimensionnement). Pour chaque
-passage : moteur utilise, nombre d'articles extraits, total, et les chips de
-controle. Sortie en tableau lisible + data/bench_results.csv.
+Pour chaque photo de test_images/, on compare :
+  (a) donut_brut         : Donut sur l'image brute
+  (b) donut_pretraite    : Donut sur l'image prétraitée (redressement+CLAHE)
+  (c) vision_seul        : LLM vision Groq seul (nécessite GROQ_API_KEY)
+  (d) pipeline_complet   : prétraitement + routage automatique (= /api/extract :
+                            Donut, puis fallback vision si sortie vide ou pays CI)
 
-Objectif : mesurer concretement l'apport du pretraitement (src/preprocess.py)
-sur des photos reelles hors distribution CORD.
+Pour chacune : moteur utilisé, nb d'articles, total extrait, les 4 chips
+(lignes / total / taxe / équilibre), temps d'exécution, et l'erreur si il y en a.
+
+Sortie : tableau lisible en console + data/bench_results.csv.
+
+⚠️ Attente réaliste (à documenter, pas à masquer) :
+  - photos 1 et 2 (domaine de Donut, mais mauvaise qualité) : le prétraitement
+    DOIT améliorer (a) -> (b).
+  - photo 3 (hors domaine : facture française en tableau) : Donut échouera,
+    c'est attendu ; seul le fallback vision (c/d) peut produire quelque chose,
+    et la réponse indiquera engine=llm_fallback.
 
 Usage :
-    python scripts/bench_extraction.py [--images DOSSIER] [--fallback]
-
-  --fallback : sur le passage pretraite, autorise le fallback vision Groq
-               (necessite GROQ_API_KEY) quand Donut rend une sortie vide.
+    python scripts/bench_extraction.py [--images DOSSIER] [--country CI|ID]
 """
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -26,9 +35,11 @@ from PIL import Image
 from src.preprocess import preprocess_image
 from src.receipt import Receipt
 from src.rules import audit
+from src.accounting import journal_entry, is_balanced
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 CHIP = {True: "✅", False: "❌", None: "➖"}
+CONFIGS = ["donut_brut", "donut_pretraite", "vision_seul", "pipeline_complet"]
 
 
 def load_donut():
@@ -41,115 +52,148 @@ def load_donut():
     return processor, model.to(device), device
 
 
-def run_once(image, donut, country, allow_fallback):
-    """Un passage complet image -> (engine, receipt, flags)."""
+def _donut_extract(image, donut):
+    """Image -> Receipt via Donut. Monkeypatchable pour les tests."""
     from src.extractor import extract
     processor, model, device = donut
-    engine = "donut"
+    return Receipt.from_gt_parse(extract(image, model, processor, device))
+
+
+def _vision_extract(image):
+    """Image -> Receipt via LLM vision Groq. Monkeypatchable pour les tests."""
+    from src.llm import extract_receipt_via_vision
+    return Receipt.from_gt_parse(extract_receipt_via_vision(image))
+
+
+def chips_of(receipt, country):
+    """Les 4 chips affichés par le front : lignes, total, taxe, équilibre."""
+    flags = audit(receipt, country=country)
     try:
-        prediction = extract(image, model, processor, device)
-    except Exception:
-        prediction = {}
-    receipt = Receipt.from_gt_parse(prediction)
-
-    incoherent = (not receipt.items) and (not receipt.total)
-    if allow_fallback and incoherent and os.environ.get("GROQ_API_KEY"):
-        try:
-            from src.llm import extract_receipt_via_vision
-            vision = extract_receipt_via_vision(image)
-            vr = Receipt.from_gt_parse(vision)
-            if vr.items or vr.total:
-                receipt, engine = vr, "llm_fallback"
-        except Exception:
-            pass
-    return engine, receipt, audit(receipt, country=country)
+        entry = journal_entry(receipt, category=None, country=country)
+        balanced = is_balanced(entry) if entry else None
+    except (ValueError, KeyError):
+        balanced = None
+    return flags["line_sum_ok"], flags["total_ok"], flags["tax_ok"], balanced
 
 
-def bench(images_dir, country="CI", allow_fallback=False):
+def _empty(receipt):
+    return (not receipt.items) and (receipt.total is None)
+
+
+def run_config(config, base_img, pre_img, donut, country):
+    """Execute une des 4 configurations, renvoie un dict de resultats + timing."""
+    t0 = time.perf_counter()
+    engine, receipt, err = config.split("_")[0], Receipt([], None, None, None), None
+    try:
+        if config == "donut_brut":
+            engine, receipt = "donut", _donut_extract(base_img, donut)
+        elif config == "donut_pretraite":
+            engine, receipt = "donut", _donut_extract(pre_img, donut)
+        elif config == "vision_seul":
+            if not os.environ.get("GROQ_API_KEY"):
+                raise RuntimeError("GROQ_API_KEY absente")
+            engine, receipt = "llm_fallback", _vision_extract(base_img)
+        elif config == "pipeline_complet":
+            engine, receipt = "donut", _donut_extract(pre_img, donut)
+            if (_empty(receipt) or country == "CI") and os.environ.get("GROQ_API_KEY"):
+                try:
+                    vr = _vision_extract(pre_img)
+                    if vr.items or vr.total is not None:
+                        engine, receipt = "llm_fallback", vr
+                except Exception:
+                    pass  # on garde Donut, le pipeline reel fait pareil
+    except Exception as exc:
+        err = f"{type(exc).__name__}: {exc}"[:60]
+        engine = "—"
+    dt = time.perf_counter() - t0
+
+    ls, to, tx, bal = chips_of(receipt, country)
+    return {
+        "config": config, "moteur": engine,
+        "n_articles": len(receipt.items), "total": receipt.total,
+        "chip_lignes": ls, "chip_total": to, "chip_taxe": tx, "chip_equilibre": bal,
+        "temps_s": round(dt, 2), "erreur": err,
+    }
+
+
+def bench(images_dir, country="CI"):
     paths = sorted(p for p in Path(images_dir).iterdir() if p.suffix.lower() in IMAGE_EXTS)
     if not paths:
         print(f"Aucune image dans {images_dir}/ (extensions : {sorted(IMAGE_EXTS)}).")
         return []
 
-    print(f"Chargement de Donut… ({len(paths)} image(s) à traiter, 2 passages chacune)")
+    if not os.environ.get("GROQ_API_KEY"):
+        print("ℹ️  GROQ_API_KEY absente : les configs 'vision_seul' et le fallback "
+              "de 'pipeline_complet' seront marqués indisponibles.")
+    print(f"Chargement de Donut… ({len(paths)} image(s) × 4 configurations)")
     donut = load_donut()
-    rows = []
 
+    rows = []
     for path in paths:
         try:
             base = Image.open(path).convert("RGB")
         except Exception:
             print(f"⚠️  {path.name} : illisible, ignorée.")
             continue
-
-        # passage 1 : image BRUTE (juste RGB, aucun pretraitement)
-        e1, r1, f1 = run_once(base, donut, country, allow_fallback=False)
-        rows.append(_row(path.name, "brute", e1, r1, f1, {"deskewed": False, "clahe": False}))
-
-        # passage 2 : image PRETRAITEE
-        pre, info = preprocess_image(base)
-        e2, r2, f2 = run_once(pre, donut, country, allow_fallback)
-        rows.append(_row(path.name, "pretraitee", e2, r2, f2, info))
+        pre, _ = preprocess_image(base)
+        for config in CONFIGS:
+            r = run_config(config, base, pre, donut, country)
+            r["image"] = path.name
+            rows.append(r)
 
     _print_table(rows)
     _save_csv(rows)
-    _summarize(rows)
+    _interpret(rows)
     return rows
 
 
-def _row(name, variant, engine, receipt, flags, info):
-    return {
-        "image": name, "variante": variant, "moteur": engine,
-        "n_articles": len(receipt.items), "total": receipt.total,
-        "deskew": info.get("deskewed"), "clahe": info.get("clahe"),
-        "line_sum_ok": flags["line_sum_ok"], "total_ok": flags["total_ok"],
-        "tax_ok": flags["tax_ok"], "anomalie": flags["anomaly"],
-    }
-
-
 def _print_table(rows):
-    header = f"{'image':<22}{'variante':<12}{'moteur':<13}{'articles':>9}{'total':>14}   chips (lignes/total/taxe)"
-    print("\n" + header)
-    print("-" * len(header))
+    hdr = (f"{'image':<26}{'config':<18}{'moteur':<13}{'art.':>5}{'total':>13}"
+           f"   {'chips (L/T/Tx/Éq)':<18}{'temps':>7}  erreur")
+    print("\n" + hdr)
+    print("-" * len(hdr))
     for r in rows:
-        chips = f"{CHIP[r['line_sum_ok']]} {CHIP[r['total_ok']]} {CHIP[r['tax_ok']]}"
+        chips = f"{CHIP[r['chip_lignes']]}{CHIP[r['chip_total']]}{CHIP[r['chip_taxe']]}{CHIP[r['chip_equilibre']]}"
         total = "—" if r["total"] is None else f"{r['total']:,.0f}".replace(",", " ")
-        print(f"{r['image'][:21]:<22}{r['variante']:<12}{r['moteur']:<13}"
-              f"{r['n_articles']:>9}{total:>14}   {chips}")
+        err = r["erreur"] or ""
+        print(f"{r['image'][:25]:<26}{r['config']:<18}{r['moteur']:<13}"
+              f"{r['n_articles']:>5}{total:>13}   {chips:<18}{r['temps_s']:>6}s  {err}")
 
 
 def _save_csv(rows):
     import pandas as pd
+    cols = ["image", "config", "moteur", "n_articles", "total", "chip_lignes",
+            "chip_total", "chip_taxe", "chip_equilibre", "temps_s", "erreur"]
     out = Path("data/bench_results.csv")
-    pd.DataFrame(rows).to_csv(out, index=False)
+    pd.DataFrame(rows)[cols].to_csv(out, index=False)
     print(f"\n💾 Résultats sauvegardés dans {out}")
 
 
-def _summarize(rows):
-    """Compare brute vs pretraitee : le pretraitement extrait-il plus ?"""
-    brute = [r for r in rows if r["variante"] == "brute"]
-    pre = [r for r in rows if r["variante"] == "pretraitee"]
-    if not brute or not pre:
-        return
-    n_brute = sum(r["n_articles"] for r in brute)
-    n_pre = sum(r["n_articles"] for r in pre)
-    nonempty_brute = sum(1 for r in brute if r["n_articles"] or r["total"] is not None)
-    nonempty_pre = sum(1 for r in pre if r["n_articles"] or r["total"] is not None)
-    print("\n=== Synthèse (apport du prétraitement) ===")
-    print(f"Articles extraits au total   : brute {n_brute}  →  prétraitée {n_pre}")
-    print(f"Images avec extraction utile : brute {nonempty_brute}/{len(brute)}  →  "
-          f"prétraitée {nonempty_pre}/{len(pre)}")
+def _interpret(rows):
+    """Compare donut_brut vs donut_pretraite par image (le prétraitement aide-t-il ?)."""
+    by_image = {}
+    for r in rows:
+        by_image.setdefault(r["image"], {})[r["config"]] = r
+    print("\n=== Interprétation (Donut brut → prétraité) ===")
+    for img, cfgs in by_image.items():
+        a, b = cfgs.get("donut_brut"), cfgs.get("donut_pretraite")
+        if not a or not b:
+            continue
+        delta = b["n_articles"] - a["n_articles"]
+        verdict = ("gain" if delta > 0 else ("perte" if delta < 0 else "aucun changement"))
+        print(f"{img:<26} articles {a['n_articles']} → {b['n_articles']}  ({verdict})")
+    print("Note : sur une facture hors domaine, seule une config vision (c/d) peut "
+          "produire un résultat ; l'échec de Donut y est attendu et documenté.")
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="Banc d'essai extraction (brute vs prétraitée).")
+    ap = argparse.ArgumentParser(description="Banc d'essai extraction (4 configurations).")
     ap.add_argument("--images", default="test_images", help="dossier d'images (défaut: test_images/)")
-    ap.add_argument("--country", default="CI", help="pays pour l'audit (CI/ID, défaut: CI)")
-    ap.add_argument("--fallback", action="store_true", help="autoriser le fallback vision Groq")
+    ap.add_argument("--country", default="CI", help="pays pour l'audit et le routage (CI/ID)")
     args = ap.parse_args()
 
     if not Path(args.images).is_dir():
-        print(f"Dossier '{args.images}/' introuvable. Créez-le et déposez-y des photos de reçus, "
+        print(f"Dossier '{args.images}/' introuvable. Déposez-y vos photos de reçus, "
               f"puis relancez :  python scripts/bench_extraction.py --images {args.images}")
         sys.exit(0)
-    bench(args.images, country=args.country, allow_fallback=args.fallback)
+    bench(args.images, country=args.country)
