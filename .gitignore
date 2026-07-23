@@ -45,6 +45,10 @@ models/*.ckpt
 htmlcov/
 .coverage
 
+# --- Images de test locales (fournies par l'utilisateur) + sortie du banc ---
+test_images/
+data/bench_results.csv
+
 # --- OS ---
 .DS_Store
 Thumbs.db
