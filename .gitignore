@@ -23,6 +23,12 @@ ENV/
 .env.*
 !.env.example
 
+# --- Claude Code / MCP local config (may contain tokens) ---
+.claude.json
+.claude.json.backup
+.mcp.json
+.claude/settings.local.json
+
 # --- Data (large / raw files) ---
 data/*
 !data/.gitkeep
@@ -46,3 +52,13 @@ Thumbs.db
 # --- IDE ---
 .vscode/
 .idea/
+
+# Artefacts necessaires a l'application (petits, versionnes volontairement)
+!data/items.csv
+!data/receipts.csv
+!data/summaries.json
+!data/results.csv
+!data/overfitting.csv
+!data/loss_curve.csv
+!data/baseline_mlp.joblib
+!data/label_encoder.joblib

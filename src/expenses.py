@@ -18,7 +18,6 @@ def build_expense_db(split, limit=None):
         for it in r.items:
             items.append({"receipt_id": i, **it})
 
-        flags = audit(r)
         receipts.append({
             "receipt_id": i,
             "n_items": len(r.items),
@@ -26,13 +25,14 @@ def build_expense_db(split, limit=None):
             "subtotal": r.subtotal,
             "tax": r.tax,
             "total": r.total,
-            **flags,
+            **audit(r),
         })
     return pd.DataFrame(items), pd.DataFrame(receipts)
 
 
 def receipt_text(gt_full):
-    """Reconstruit le texte brut d'un recu depuis valid_line."""
+    """Reconstruit le texte brut d'un recu depuis valid_line.
+    C'est l'entree du prompting zero-shot (marchand, date)."""
     words = []
     for line in gt_full.get("valid_line", []):
         words.extend(w["text"] for w in line.get("words", []))

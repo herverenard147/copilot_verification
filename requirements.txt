@@ -1,0 +1,31 @@
+# Interface
+streamlit>=1.32
+
+# Donut (extraction image -> JSON)
+torch>=2.0
+transformers>=4.38
+
+# Donnees et calcul
+pandas>=2.0
+numpy>=1.24
+
+# Visualisation (notebooks d'exploration)
+seaborn>=0.13
+matplotlib>=3.8
+
+# Machine learning (baseline, evaluation)
+scikit-learn>=1.3
+
+# Recherche semantique (onglet Questions)
+sentence-transformers>=2.5
+faiss-cpu>=1.7
+
+# Prompt engineering / LLM (backends interchangeables)
+groq>=0.9
+google-genai>=0.3
+
+# Images
+Pillow>=10.0
+
+# Tests
+pytest>=8.0

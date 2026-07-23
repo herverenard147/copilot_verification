@@ -6,12 +6,11 @@ from src.utils import clean_amount, ensure_list
 
 
 def receipt_to_rows(gt_parse, receipt_id):
-    """Un recu (JSON hierarchique) -> une liste de lignes plates,
-    une ligne par article achete."""
+    """Un recu -> une liste de lignes plates, une par article achete."""
     rows = []
     for item in ensure_list(gt_parse.get("menu")):
         if not isinstance(item, dict):
-            continue   # ligne inexploitable, on l'ignore
+            continue
         rows.append({
             "receipt_id": receipt_id,
             "item_name": item.get("nm"),
@@ -23,9 +22,9 @@ def receipt_to_rows(gt_parse, receipt_id):
 
 
 def merge_blocks(x):
-    """CORD encode parfois sub_total/total comme UNE liste de blocs
-    (ex: sous-total avant et apres remise). On fusionne tout en un
-    seul dict ; en cas de doublon de cle, le dernier bloc gagne."""
+    """CORD encode parfois sub_total/total comme UNE LISTE de blocs
+    (ex: sous-total avant et apres remise). On fusionne en un seul dict ;
+    en cas de doublon de cle, le dernier bloc gagne."""
     merged = {}
     for block in ensure_list(x):
         if isinstance(block, dict):
@@ -34,11 +33,12 @@ def merge_blocks(x):
 
 
 def totals_of(gt_parse):
-    """Extrait les totaux d'un recu."""
+    """Extrait subtotal, tax, total d'un recu."""
     total = merge_blocks(gt_parse.get("total"))
     sub = merge_blocks(gt_parse.get("sub_total"))
 
-    def first(x):   # une VALEUR peut aussi etre une liste
+    def first(x):
+        """Une VALEUR individuelle peut aussi etre une liste."""
         vals = ensure_list(x)
         return vals[0] if vals else None
 
