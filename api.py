@@ -7,7 +7,9 @@ le fallback vision, et servir le front statique de web/.
 
 Lancer :  uvicorn api:app --reload
 """
+import functools
 import io
+import logging
 import math
 import os
 from pathlib import Path
@@ -19,6 +21,8 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import BaseModel
+
+logger = logging.getLogger("copilote.api")
 
 from src.receipt import Receipt
 from src.rules import audit, TAX_RATES
@@ -132,12 +136,40 @@ def to_jsonable(obj):
 
 
 def ok(payload):
-    return JSONResponse(to_jsonable(payload))
+    data = {"success": True}
+    data.update(payload)
+    return JSONResponse(to_jsonable(data))
 
 
-def error(message, status=400):
-    """Erreur JSON propre, message humain, JAMAIS de traceback vers le front."""
-    return JSONResponse({"error": message}, status_code=status)
+def fail(error_msg, detail="", status=422, engine="donut", suggestions=None):
+    """Erreur JSON propre et STRUCTUREE. Le message est humain et court ; le
+    traceback complet part dans les logs serveur, JAMAIS dans la reponse HTTP.
+    Statut != 500 : une image inattendue ne doit pas casser la demo."""
+    return JSONResponse({
+        "success": False,
+        "error": error_msg,
+        "detail": detail,
+        "engine": engine,
+        "suggestions": suggestions or ["Réessayer avec une photo plus nette",
+                                        "Saisir les données manuellement"],
+    }, status_code=status)
+
+
+def safe(fn):
+    """Enveloppe un endpoint : toute exception non prevue est journalisee
+    (logging.exception) et transformee en JSON propre non-500. functools.wraps
+    preserve la signature, donc FastAPI continue d'injecter les parametres."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception:
+            logger.exception("Erreur non gérée dans %s", fn.__name__)
+            return fail("Une erreur inattendue est survenue.",
+                        detail="L'incident a été enregistré côté serveur. Réessayez.",
+                        status=400, engine="server",
+                        suggestions=["Réessayer", "Recharger la page"])
+    return wrapper
 
 
 def _nan(value):
@@ -169,9 +201,12 @@ def build_receipt_bundle(receipt, country, payment_mode, merchant, category=None
     try:
         entry = journal_entry(receipt, category=category, payment_mode=payment_mode,
                               country=country, merchant=merchant)
-        balanced = is_balanced(entry)
     except (ValueError, KeyError):
-        entry, balanced = None, None
+        entry = None
+    # journal_entry renvoie [] pour un recu vide : on l'expose comme None pour
+    # que le front affiche "écriture impossible" plutôt qu'un tableau vide.
+    balanced = is_balanced(entry) if entry else None
+    entry = entry or None
     recoverable, reason = vat_recoverable(receipt, merchant=merchant)
     return {
         "receipt": {
@@ -193,14 +228,24 @@ def build_receipt_bundle(receipt, country, payment_mode, merchant, category=None
 # POST /api/extract
 # ---------------------------------------------------------------------------
 @app.post("/api/extract")
+@safe
 def api_extract(file: UploadFile = File(...), country: str = Form("CI"),
                 payment_mode: str = Form("cash"), merchant: str = Form(None)):
     try:
         raw = file.file.read()
+    except Exception:
+        return fail("Fichier illisible.", detail="Le fichier n'a pas pu être lu.", status=422)
+    if not raw:
+        return fail("Fichier vide.",
+                    detail="Le fichier reçu ne contient aucune donnée.", status=422)
+    try:
         image = Image.open(io.BytesIO(raw))
         image.load()
     except Exception:
-        return error("Image illisible. Vérifiez qu'il s'agit bien d'un JPG ou PNG valide.", 400)
+        logger.exception("Ouverture image échouée (%s octets)", len(raw))
+        return fail("Impossible de lire ce reçu",
+                    detail="Le fichier n'est pas une image valide (JPG ou PNG attendu).",
+                    status=422)
 
     try:
         pre_img, pre_info = preprocess_image(image)
@@ -262,6 +307,7 @@ class ValidatePayload(BaseModel):
 
 
 @app.post("/api/validate")
+@safe
 def api_validate(payload: ValidatePayload):
     # normalise les articles recus du front
     items = []
@@ -292,9 +338,12 @@ def api_validate(payload: ValidatePayload):
             new_id = _append_to_csv(receipt, payload.category, bundle["audit"])
             bundle["persisted"] = True
             bundle["receipt_id"] = new_id
-        except Exception as exc:  # ne jamais renvoyer un traceback
-            return error(f"Enregistrement impossible : {type(exc).__name__}. "
-                         "Le reçu a été vérifié mais pas sauvegardé.", 500)
+        except Exception:  # ne jamais renvoyer un traceback
+            logger.exception("Persistance CSV échouée")
+            return fail("Enregistrement impossible",
+                        detail="Le reçu a été vérifié mais n'a pas pu être sauvegardé.",
+                        status=422, engine="server",
+                        suggestions=["Réessayer plus tard"])
     return ok(bundle)
 
 
@@ -330,6 +379,7 @@ def _append_to_csv(receipt, category, flags):
 # GET /api/dashboard
 # ---------------------------------------------------------------------------
 @app.get("/api/dashboard")
+@safe
 def api_dashboard():
     receipts = load_receipts()
     items = load_items()
@@ -373,6 +423,7 @@ def api_dashboard():
 # GET /api/accounting?period=
 # ---------------------------------------------------------------------------
 @app.get("/api/accounting")
+@safe
 def api_accounting(period: str = "Mois en cours", payment_mode: str = "cash", country: str = "CI"):
     receipts = load_receipts()
     if receipts.empty:
@@ -410,10 +461,12 @@ class SearchPayload(BaseModel):
 
 
 @app.post("/api/search")
+@safe
 def api_search(payload: SearchPayload):
     question = (payload.question or "").strip()
     if not question:
-        return error("Question vide.", 400)
+        return fail("Question vide.", detail="Saisissez une question.", status=422,
+                    engine="search", suggestions=["Poser une question"])
 
     encoder, index, summaries = get_search()
     if encoder is None:
@@ -450,6 +503,7 @@ def _csv_records(name):
 
 
 @app.get("/api/technical")
+@safe
 def api_technical():
     return ok({
         "results": _csv_records("results.csv"),
@@ -462,6 +516,7 @@ def api_technical():
 # GET /api/config  (le front s'auto-configure : pays, comptes, dispo Groq)
 # ---------------------------------------------------------------------------
 @app.get("/api/config")
+@safe
 def api_config():
     return ok({
         "countries": {c: TAX_RATES[c] for c in TAX_RATES},
@@ -473,12 +528,19 @@ def api_config():
 
 
 # ---------------------------------------------------------------------------
-# Filet de securite : toute erreur non geree -> JSON, jamais un traceback HTML
+# Filet de securite ULTIME : toute erreur non geree -> JSON structure, JAMAIS
+# un 500 avec traceback. Le detail technique part dans les logs.
 # ---------------------------------------------------------------------------
 @app.exception_handler(Exception)
 async def any_error(request, exc):
-    return JSONResponse({"error": "Erreur interne. Réessayez ; si le problème "
-                         "persiste, vérifiez les logs du serveur."}, status_code=500)
+    logger.exception("Exception non gérée sur %s", request.url.path)
+    return JSONResponse({
+        "success": False,
+        "error": "Une erreur inattendue est survenue.",
+        "detail": "L'incident a été enregistré côté serveur.",
+        "engine": "server",
+        "suggestions": ["Réessayer", "Recharger la page"],
+    }, status_code=400)
 
 
 # ---------------------------------------------------------------------------

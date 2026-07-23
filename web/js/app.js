@@ -157,21 +157,26 @@ async function handleFile(file) {
     renderResult(data);
   } catch (e) {
     clearInterval(timer);
-    renderError(e.message);
+    renderError(e);
   }
 }
 
-function renderError(msg) {
+// consomme le format d'erreur structuré de l'API :
+// { error, detail, suggestions } (voir fail() dans api.py)
+function renderError(err) {
+  const title = (err && err.message) || 'Impossible de lire ce reçu';
+  const detail = (err && err.detail) || '';
+  const suggestions = (err && err.suggestions && err.suggestions.length)
+    ? err.suggestions
+    : ['Réessayer avec une photo plus nette', 'Saisir les données manuellement'];
+
   $('#analyze-body').innerHTML = `
     <div class="card"><div class="section-body">
-      <div class="error-box"><b>Impossible de lire ce reçu.</b><br>${esc(msg)}</div>
-      <details style="margin-top:var(--md)"><summary>Causes probables</summary>
-        <ul class="muted body-sm">
-          <li>Image floue, trop sombre, ou coins hors cadre</li>
-          <li>Format non pris en charge (utilisez JPG ou PNG)</li>
-          <li>Reçu très éloigné du domaine d'entraînement du modèle</li>
-        </ul>
-      </details>
+      <div class="error-box"><b>${esc(title)}</b>${detail ? `<br>${esc(detail)}` : ''}</div>
+      <div style="margin-top:var(--md)">
+        <div class="label-caps">Suggestions</div>
+        <ul class="muted body-sm">${suggestions.map(s => `<li>${esc(s)}</li>`).join('')}</ul>
+      </div>
       <div class="btn-row" style="margin-top:var(--md)">
         <button class="btn btn--primary" id="err-retry">📷 Essayer une autre image</button>
         <button class="btn" id="err-manual">✏️ Saisir les données manuellement</button>

@@ -4,12 +4,15 @@ const API = {
   async _json(res) {
     let data = null;
     try { data = await res.json(); } catch (e) { /* corps non-JSON */ }
-    if (!res.ok) {
-      const msg = (data && data.error) ? data.error
-        : `Erreur ${res.status}. Le serveur n'a pas pu traiter la demande.`;
-      throw new Error(msg);
+    // erreur si statut HTTP non-OK OU si le corps porte success:false
+    if (!res.ok || (data && data.success === false)) {
+      const err = new Error((data && data.error)
+        || `Erreur ${res.status}. Le serveur n'a pas pu traiter la demande.`);
+      err.detail = (data && data.detail) || '';
+      err.suggestions = (data && data.suggestions) || [];
+      err.engine = (data && data.engine) || null;
+      throw err;
     }
-    if (data && data.error) throw new Error(data.error);
     return data;
   },
 
