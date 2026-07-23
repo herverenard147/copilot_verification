@@ -1,0 +1,8 @@
+# Palette issue de DESIGN.md (design system Stitch "Precise Ledger").
+[theme]
+base = "light"
+primaryColor = "#1E5F74"
+backgroundColor = "#F8F9FF"
+secondaryBackgroundColor = "#EFF4FF"
+textColor = "#0B1C30"
+font = "sans serif"
