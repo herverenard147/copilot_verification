@@ -1,0 +1,3 @@
+modele,exactitude_total,json_valide,entraine_par_moi
+Donut (pré-entraîné),0.9787,1.0,False
+Baseline MLP,0.1915,,True

@@ -6,20 +6,21 @@ from src.data_loader import merge_blocks
 class Receipt:
     """Represente un recu normalise.
 
-    Plutot que de trimballer des dictionnaires JSON bruts partout,
-    on cree un objet qui SAIT calculer des choses sur lui-meme.
+    Plutot que de trimballer des dictionnaires JSON bruts partout, on cree un
+    objet qui SAIT calculer des choses sur lui-meme.
     """
 
     def __init__(self, items, subtotal=None, tax=None, total=None, receipt_id=None):
         self.receipt_id = receipt_id
-        self.items = items          # liste de dicts: name, quantity, unit_price, line_price
+        self.items = items
         self.subtotal = subtotal
         self.tax = tax
         self.total = total
 
     @classmethod
     def from_gt_parse(cls, gt_parse, receipt_id=None):
-        """Construit un Receipt depuis le JSON CORD (ou une sortie Donut)."""
+        """Construit un Receipt depuis un JSON CORD OU une sortie Donut.
+        Meme moule pour les deux : c'est ce qui permet de comparer."""
         items = []
         for it in ensure_list(gt_parse.get("menu")):
             if not isinstance(it, dict):

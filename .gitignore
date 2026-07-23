@@ -52,3 +52,13 @@ Thumbs.db
 # --- IDE ---
 .vscode/
 .idea/
+
+# Artefacts necessaires a l'application (petits, versionnes volontairement)
+!data/items.csv
+!data/receipts.csv
+!data/summaries.json
+!data/results.csv
+!data/overfitting.csv
+!data/loss_curve.csv
+!data/baseline_mlp.joblib
+!data/label_encoder.joblib

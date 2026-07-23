@@ -1,0 +1,3 @@
+config,train,validation,ecart
+Sans régularisation (2000 ex.),0.6355,0.5238,0.1117
+Avec régularisation + early stopping,0.58,0.5371,0.0429
