@@ -4,13 +4,29 @@ TROIS BACKENDS INTERCHANGEABLES. Le projet ne depend d'aucun fournisseur en
 particulier : si l'un est indisponible (quota, region, panne), on bascule sans
 toucher au reste du code. Cette abstraction existe parce que le quota gratuit
 Gemini s'est revele indisponible en cours de projet.
+
+Ce module contient AUSSI le fallback vision hors-domaine (extract_receipt_via_
+vision) : quand Donut echoue -- typiquement sur un ticket hors de sa
+distribution CORD, ex. un ticket ivoirien -- un LLM vision lit l'image et
+renvoie le MEME schema JSON. C'est un fallback ASSUME, jamais cache : l'API
+indique toujours quel moteur a produit le resultat.
 """
+import base64
+import io
 import json
+import os
 import re
 
 _backend = None
 _client = None
 _model_name = None
+
+# Modele vision Groq. Surchargeable par variable d'environnement car la
+# disponibilite des modeles Groq evolue ; en cas de nom invalide, le fallback
+# echoue proprement (capte par l'appelant) au lieu de planter.
+DEFAULT_VISION_MODEL = os.environ.get(
+    "GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"
+)
 
 
 def init_llm(backend="groq", api_key=None, model_name=None):
@@ -103,3 +119,78 @@ Reçus pertinents :
 
 Question : {question}"""
     return _ask(prompt)
+
+
+# ---------------------------------------------------------------------------
+# Fallback vision hors-domaine
+# ---------------------------------------------------------------------------
+# Schema cible : EXACTEMENT celui de CORD/Donut, pour que Receipt.from_gt_parse
+# fonctionne sans distinction de moteur. Donut pour son domaine (reçus
+# indonesiens), le LLM vision au-dela (ex. reçus ivoiriens).
+_VISION_SCHEMA_PROMPT = """Tu analyses la PHOTO d'un ticket de caisse. Extrais les informations et
+réponds UNIQUEMENT par un objet JSON valide, sans texte autour, sans balises,
+respectant EXACTEMENT ce schéma :
+
+{
+  "menu": [
+    {"nm": "nom de l'article", "cnt": "quantité", "unitprice": "prix unitaire", "price": "prix total ligne"}
+  ],
+  "sub_total": {"subtotal_price": "sous-total HT", "tax_price": "montant de la taxe"},
+  "total": {"total_price": "total TTC"}
+}
+
+Règles :
+- Les montants sont des chaînes de chiffres, sans symbole monétaire ni espace (ex: "25000").
+- Si un champ est absent du ticket, mets-le à null (ou omets la clé).
+- N'invente aucun montant : recopie ce qui est lisible sur l'image.
+- N'ajoute AUCUN texte hors du JSON."""
+
+
+def _pil_to_data_uri(image, fmt="JPEG"):
+    """Encode une image PIL en data URI base64 (pour l'API vision)."""
+    buffer = io.BytesIO()
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+    image.save(buffer, format=fmt)
+    b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
+    mime = "image/jpeg" if fmt.upper() in ("JPG", "JPEG") else "image/png"
+    return f"data:{mime};base64,{b64}"
+
+
+def extract_receipt_via_vision(image, api_key=None, model=None):
+    """FALLBACK VISION : une image PIL -> le meme dict que Donut (schema CORD).
+
+    Utilise un modele vision Groq. Leve une exception si la cle est absente,
+    le modele indisponible, ou la reponse non exploitable : c'est a l'appelant
+    (l'API) de decider quoi faire -- ici, retomber sur le resultat Donut et le
+    signaler. On ne masque jamais l'echec.
+    """
+    api_key = api_key or os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError("Aucune cle Groq : fallback vision indisponible")
+
+    from groq import Groq
+    client = Groq(api_key=api_key)
+    model = model or DEFAULT_VISION_MODEL
+    data_uri = _pil_to_data_uri(image)
+
+    response = client.chat.completions.create(
+        model=model,
+        temperature=0,
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": _VISION_SCHEMA_PROMPT},
+                {"type": "image_url", "image_url": {"url": data_uri}},
+            ],
+        }],
+    )
+    raw = response.choices[0].message.content
+    cleaned = re.sub(r"```json|```", "", raw).strip()
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    parsed = json.loads(match.group(0) if match else cleaned)
+    # normalise : garantir les cles attendues par Receipt.from_gt_parse
+    parsed.setdefault("menu", [])
+    parsed.setdefault("sub_total", {})
+    parsed.setdefault("total", {})
+    return parsed
