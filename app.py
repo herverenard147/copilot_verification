@@ -4,6 +4,7 @@ Style et conventions : voir DESIGN.md (palette, typographie, chips a 3
 etats, tag ambre "a verifier", tableaux debit/credit).
 """
 import json
+import os
 
 import numpy as np
 import pandas as pd
@@ -35,6 +36,7 @@ def init_state():
         "analyze_error": None,
         "manual_entries": [],        # recus valides manuellement pendant la session
         "qa_history": [],
+        "groq_api_key": os.environ.get("GROQ_API_KEY", ""),
         "selected_receipt_id": None,
         "selected_anomaly_id": None,
         "show_batch_upload": False,
@@ -91,6 +93,14 @@ def load_data():
     except FileNotFoundError:
         items, receipts = _example_data()
 
+    if "category" not in receipts.columns and "category" in items.columns:
+        # categorie dominante par recu (mode des categories de ses articles) —
+        # utile a l'onglet Comptabilite pour le mapping categorie -> compte.
+        dominant = items.groupby("receipt_id")["category"].agg(
+            lambda s: s.mode().iat[0] if not s.mode().empty else None
+        )
+        receipts = receipts.merge(dominant.rename("category"), on="receipt_id", how="left")
+
     try:
         with open("data/summaries.json") as f:
             summaries = json.load(f)
@@ -127,6 +137,16 @@ def load_search_index(summaries_tuple):
         return encoder, index
     except Exception:
         return None, None
+
+
+@st.cache_resource(show_spinner=False)
+def _init_groq(api_key):
+    """Initialise le backend Groq une seule fois par cle. Les erreurs (cle
+    invalide, quota, reseau) remontent a l'appelant, qui degrade avec
+    la reponse-gabarit plutot que de planter l'onglet Questions."""
+    from src.llm import init_llm
+    init_llm(backend="groq", api_key=api_key)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +233,14 @@ def render_settings_sidebar(receipts):
             s["line_sum_tolerance"] = st.slider("Écart lignes / sous-total toléré", 0.0, 0.10, s["line_sum_tolerance"])
             s["total_tolerance"] = st.slider("Écart sous-total+taxe / total toléré", 0.0, 0.10, s["total_tolerance"])
             s["tax_band"] = st.slider("Bande de plausibilité du taux de taxe", 0.0, 0.10, s["tax_band"])
+
+        with st.expander("Assistant IA (optionnel)"):
+            st.caption("Sans clé, l'onglet Questions reste utilisable : recherche FAISS "
+                       "seule, sans réponse générée par un LLM (dégradation gracieuse).")
+            st.session_state.groq_api_key = st.text_input(
+                "Clé API Groq", value=st.session_state.groq_api_key, type="password",
+                help="Gratuite sur console.groq.com — laissez vide pour désactiver la génération de réponse.",
+            )
 
         with st.expander("Export / purge"):
             st.download_button(
@@ -513,19 +541,35 @@ def render_receipt_detail(receipts, items, receipt_id):
     st.divider()
 
 
+def _failing_rule(row):
+    """Identifie QUELLE regle a echoue en premier (line_sum > total > taxe),
+    et les deux valeurs a comparer pour l'expliquer. Reutilise pour le libelle
+    court (liste des anomalies) et le detail arithmetique complet."""
+    if row.get("line_sum_ok") is False:
+        return "Somme des lignes ≠ sous-total", "Somme des lignes", row.get("items_sum"), "Sous-total déclaré", row.get("subtotal")
+    if row.get("total_ok") is False:
+        subtotal_plus_tax = (row.get("subtotal") or 0) + (row.get("tax") or 0)
+        return "Sous-total + taxe ≠ total", "Sous-total + taxe", subtotal_plus_tax, "Total déclaré", row.get("total")
+    if row.get("tax_ok") is False:
+        return "Taux de taxe suspect", "Taxe déclarée", row.get("tax"), "Sous-total déclaré", row.get("subtotal")
+    return "Anomalie non classée", None, None, None, None
+
+
 def render_anomaly_detail(receipts, receipt_id):
     row = receipts[receipts["receipt_id"] == receipt_id]
     if row.empty:
         return
     row = row.iloc[0]
-    sum_lines = row.get("items_sum")
-    declared = row.get("subtotal")
     st.markdown(f"#### Anomalie — Reçu #{receipt_id}")
-    if sum_lines is not None and declared not in (None, 0) and not pd.isna(sum_lines) and not pd.isna(declared):
-        ecart = declared - sum_lines
-        pct = abs(ecart) / declared * 100
+
+    règle, label_a, val_a, label_b, val_b = _failing_rule(row)
+    st.caption(règle)
+    if (val_a is not None and val_b not in (None, 0)
+            and not pd.isna(val_a) and not pd.isna(val_b)):
+        ecart = val_b - val_a
+        pct = abs(ecart) / val_b * 100
         st.markdown(
-            f"**Somme des lignes :** {money(sum_lines)} · **Déclaré :** {money(declared)} · "
+            f"**{label_a} :** {money(val_a)} · **{label_b} :** {money(val_b)} · "
             f"**Écart :** {money(abs(ecart))} ({pct:.1f}%)"
         )
     else:
@@ -586,10 +630,10 @@ def render_dashboard_tab(items, receipts):
             with st.container(border=True):
                 left, right = st.columns([3, 1])
                 with left:
-                    règle = "Somme des lignes ≠ sous-total" if row.get("line_sum_ok") is False else (
-                        "Sous-total + taxe ≠ total" if row.get("total_ok") is False else "Taux de taxe suspect")
+                    règle, label_a, val_a, label_b, val_b = _failing_rule(row)
                     st.markdown(f"**Reçu #{rid}** — {règle}")
-                    st.caption(f"Calculé : {money(row.get('items_sum'))}  ·  Déclaré : {money(row.get('subtotal'))}")
+                    if label_a:
+                        st.caption(f"{label_a} : {money(val_a)}  ·  {label_b} : {money(val_b)}")
                 with right:
                     if st.button("Voir le détail", key=f"anomaly_btn_{rid}"):
                         st.session_state.selected_anomaly_id = rid
@@ -717,10 +761,24 @@ def render_ask_tab(summaries):
         else:
             from src.semantic import search
             results = search(question, encoder, index, summaries, k=5)
+
+            llm_answer = None
+            if results and st.session_state.groq_api_key:
+                try:
+                    _init_groq(st.session_state.groq_api_key)
+                    from src.llm import answer_question
+                    llm_answer = answer_question(question, [texte for texte, _ in results])
+                except Exception:
+                    llm_answer = None   # degradation gracieuse : on retombe sur la reponse-gabarit
+
             with st.container(border=True):
                 st.markdown("**Réponse**")
-                if results:
+                if llm_answer:
+                    st.write(llm_answer)
+                elif results:
                     st.write(f"D'après les reçus les plus pertinents, voici ce que je trouve pour : *{question}*")
+                    if st.session_state.groq_api_key:
+                        st.caption("⚠️ Génération LLM indisponible pour l'instant — réponse basée sur les sources seules.")
                 else:
                     st.write("Aucun reçu pertinent trouvé.")
 
@@ -744,37 +802,43 @@ def render_ask_tab(summaries):
 def render_technical_tab():
     st.markdown("### Donut vs baseline")
     try:
-        comparison = pd.read_csv("data/model_comparison.csv")
-        st.caption("Source : data/model_comparison.csv")
+        results = pd.read_csv("data/results.csv")
+        st.caption("Source : data/results.csv")
+        st.dataframe(
+            results, width='stretch', hide_index=True,
+            column_config={
+                "modele": "Modèle",
+                "exactitude_total": st.column_config.NumberColumn("Exactitude totale", format="percent"),
+                "json_valide": st.column_config.NumberColumn("JSON valide", format="percent"),
+                "entraine_par_moi": "Entraîné par moi",
+            },
+        )
     except FileNotFoundError:
-        comparison = pd.DataFrame({
-            "métrique": ["Précision extraction texte", "Précision mapping des champs", "Taux JSON valide"],
-            "baseline": [0.72, 0.68, 0.85],
-            "Donut (pré-entraîné)": [0.94, 0.90, 0.99],
-        })
-        st.caption("Données d'exemple — remplacer par data/model_comparison.csv (notebook 04, evaluate.py).")
-    st.dataframe(comparison, width='stretch', hide_index=True)
+        st.caption("data/results.csv absent — lancez evaluate.py (notebook 04) pour générer les résultats réels.")
 
     st.markdown("### Sur-apprentissage (baseline maison)")
     try:
-        history = pd.read_csv("data/training_history.csv")
-        st.caption("Source : data/training_history.csv")
+        overfitting = pd.read_csv("data/overfitting.csv")
+        st.caption("Source : data/overfitting.csv")
+        sans_regul = overfitting.iloc[0]
+        avec_regul = overfitting.iloc[-1]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Écart sans régularisation", f"{sans_regul['ecart']:.1%}")
+        c2.metric("Écart avec régularisation", f"{avec_regul['ecart']:.1%}",
+                  delta=f"{(avec_regul['ecart'] - sans_regul['ecart']):.1%}", delta_color="inverse")
+        c3.metric("Train accuracy (régularisé)", f"{avec_regul['train']:.1%}")
+        c4.metric("Val accuracy (régularisé)", f"{avec_regul['validation']:.1%}")
+        st.dataframe(overfitting, width='stretch', hide_index=True)
     except FileNotFoundError:
-        history = pd.DataFrame({
-            "epoch": [10, 50, 100, 250, 500],
-            "train_acc": [0.842, 0.915, 0.962, 0.992, 0.999],
-            "val_acc": [0.831, 0.898, 0.941, 0.985, 0.924],
-        })
-        st.caption("Données d'exemple — remplacer par data/training_history.csv.")
+        st.caption("data/overfitting.csv absent.")
 
-    c1, c2, c3, c4 = st.columns(4)
-    best_epoch = history.loc[history["val_acc"].idxmax()]
-    last_epoch = history.iloc[-1]
-    c1.metric("Meilleure epoch (val)", int(best_epoch["epoch"]))
-    c2.metric("Val accuracy max", f"{best_epoch['val_acc']:.1%}")
-    c3.metric("Train accuracy finale", f"{last_epoch['train_acc']:.1%}")
-    c4.metric("Écart train/val final", f"{(last_epoch['train_acc'] - last_epoch['val_acc']):.1%}")
-    st.line_chart(history.set_index("epoch")[["train_acc", "val_acc"]])
+    st.markdown("##### Courbe de perte (entraînement baseline)")
+    try:
+        loss_curve = pd.read_csv("data/loss_curve.csv")
+        st.caption("Source : data/loss_curve.csv")
+        st.line_chart(loss_curve.set_index("iteration")["loss"])
+    except FileNotFoundError:
+        st.caption("data/loss_curve.csv absent.")
 
     with st.container(border=True):
         st.markdown("##### Méthodologie : drapeau binaire plutôt que pourcentage de confiance")
