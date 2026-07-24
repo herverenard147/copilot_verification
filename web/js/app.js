@@ -444,7 +444,7 @@ async function loadDashboard() {
     const anomalies = d.anomalies.length ? `<div class="card">
       <div class="section-head"><span class="label-caps">Anomalies actives (${d.anomalies.length})</span></div>
       <div class="section-body stack">${d.anomalies.slice(0, 30).map(a => `
-        <div class="card"><div class="section-body">
+        <div class="card receipt-open" data-id="${a.receipt_id}" title="Voir le détail du reçu"><div class="section-body">
           <b>Reçu #${a.receipt_id}</b> — ${esc(a.rule)}
           ${a.a_label ? `<div class="muted body-sm tabular">${esc(a.a_label)} : ${money(a.a_value)} · ${esc(a.b_label)} : ${money(a.b_value)}
             · Écart : ${money(Math.abs((a.b_value || 0) - (a.a_value || 0)))}</div>` : ''}
@@ -452,80 +452,89 @@ async function loadDashboard() {
         ${d.anomalies.length > 30 ? `<p class="muted body-sm">… et ${d.anomalies.length - 30} autres.</p>` : ''}
       </div></div>` : '';
 
-    // Liste des reçus, cliquable : ouvre le détail complet (tâche 1).
-    const rows = (d.receipts || []).map(r => `
-      <tr class="receipt-row" data-id="${r.receipt_id}" title="Cliquer pour voir le détail du reçu">
-        <td><b>#${r.receipt_id}</b></td>
-        <td>${esc(r.category || '—')}</td>
-        <td class="num">${r.n_items}</td>
-        <td class="num">${money(r.total)}</td>
-        <td>${r.anomaly ? '⚠️ à revoir' : '✅'}</td>
-      </tr>`).join('');
-    const receiptsTable = (d.receipts && d.receipts.length) ? `<div class="card">
-      <div class="section-head"><span class="label-caps">Vos reçus (${d.receipts.length})</span>
-        <span class="muted body-sm">Cliquez une ligne pour voir le détail</span></div>
-      <table><thead><tr><th>Reçu</th><th>Catégorie</th><th class="num">Articles</th>
-        <th class="num">Total</th><th>Contrôle</th></tr></thead>
-        <tbody id="receipts-tbody">${rows}</tbody></table></div>` : '';
-
-    body.innerHTML = kpis + `<div class="grid-2">${cats}${dist}</div>` + anomalies + receiptsTable;
-    // Délégation d'événement sur le tbody : survit au re-render, une seule liaison.
-    const tbody = $('#receipts-tbody');
-    if (tbody) tbody.onclick = (e) => {
-      const tr = e.target.closest('.receipt-row');
-      if (tr) renderReceiptDetail(tr.dataset.id);
-    };
+    // Liste des reçus, cliquable (composant réutilisé pour les listes filtrées).
+    body.innerHTML = kpis + `<div class="grid-2">${cats}${dist}</div>` + anomalies
+      + receiptsListCard(d.receipts, 'Vos reçus');
+    // Délégation unique sur le tab-body : couvre lignes de liste ET cartes d'anomalie.
+    wireReceiptOpen($('#dashboard-body'), loadDashboard);
   } catch (e) {
     body.innerHTML = `<div class="error-box">${esc(e.message)}</div>`;
   }
 }
 
-// Détail complet d'un reçu (tâche 1) : réutilise chip() et money(), et le
-// bundle calculé par build_receipt_bundle côté serveur (audit + écriture).
-async function renderReceiptDetail(id) {
-  const body = $('#dashboard-body');
-  body.innerHTML = `<p class="muted">Chargement du reçu #${esc(id)}…</p>`;
+/* ==========================================================================
+   DÉTAIL D'UN REÇU — point d'entrée UNIQUE, appelé partout (Chantier 2)
+   openReceiptDetail(id, container, restore) : affiche le détail dans
+   `container` ; le bouton Retour appelle `restore()` (écran d'origine).
+   ========================================================================== */
+async function openReceiptDetail(id, container, restore) {
+  container.innerHTML = `<p class="muted">Chargement du reçu #${esc(id)}…</p>`;
   try {
-    const d = await API.receipt(id);
-    const r = d.receipt, a = d.audit || {};
-    const items = (r.items || []).map(it => `<tr>
-      <td>${esc(it.name || '—')}</td><td class="num">${it.quantity ?? ''}</td>
-      <td class="num">${money(it.unit_price)}</td><td class="num">${money(it.line_price)}</td></tr>`).join('')
-      || `<tr><td colspan="4" class="muted">Aucun article enregistré.</td></tr>`;
-    const chips = chip('Lignes / sous-total', a.line_sum_ok ?? null)
-      + chip('Sous-total + taxe / total', a.total_ok ?? null)
-      + chip('Taux de taxe plausible', a.tax_ok ?? null)
-      + chip("Équilibre de l'écriture", d.balanced ?? null);
-    const journal = d.journal ? d.journal.map(l => `<tr>
-      <td style="color:var(--primary);font-weight:500">${esc(l.account)}</td>
-      <td>${esc(l.label)}</td><td class="num">${money(l.debit)}</td>
-      <td class="num">${money(l.credit)}</td></tr>`).join('')
-      : `<tr><td colspan="4" class="muted">Écriture impossible : montants insuffisants.</td></tr>`;
-
-    body.innerHTML = `
-      <div class="btn-row" style="margin-bottom:var(--md)">
-        <button class="btn" id="detail-back">← Retour au tableau de bord</button>
-      </div>
-      <div class="card"><div class="section-head">
-        <span class="label-caps">Reçu #${esc(id)}${d.category ? ' — ' + esc(d.category) : ''}</span></div>
-        <div class="section-body muted body-sm">Reçu enregistré — aucune image conservée (les données restent en mémoire de session).</div>
-      </div>
-      <div class="card"><div class="section-head"><span class="label-caps">Articles</span></div>
-        <table><thead><tr><th>Article</th><th class="num">Qté</th><th class="num">Prix unit.</th>
-          <th class="num">Total ligne</th></tr></thead><tbody>${items}</tbody></table>
-        <div class="section-body tabular">Sous-total : ${money(r.subtotal)} · Taxe : ${money(r.tax)} · Total : ${money(r.total)}</div>
-      </div>
-      <div class="card"><div class="section-head"><span class="label-caps">Contrôles</span></div>
-        <div class="section-body">${chips}</div></div>
-      <div class="card"><div class="section-head"><span class="label-caps">Écriture comptable</span></div>
-        <table><thead><tr><th>Compte</th><th>Libellé</th><th class="num">Débit</th><th class="num">Crédit</th></tr></thead>
-          <tbody>${journal}</tbody></table></div>`;
-    $('#detail-back').onclick = loadDashboard;
+    container.innerHTML = receiptDetailHtml(id, await API.receipt(id));
   } catch (e) {
-    body.innerHTML = `<div class="error-box">${esc(e.message)}</div>
+    container.innerHTML = `<div class="error-box">${esc(e.message)}</div>
       <div class="btn-row" style="margin-top:var(--md)"><button class="btn" id="detail-back">← Retour</button></div>`;
-    const b = $('#detail-back'); if (b) b.onclick = loadDashboard;
   }
+  const b = container.querySelector('#detail-back');
+  if (b) b.onclick = restore;
+}
+
+// Détail (réutilise chip() et money() ; bundle serveur = build_receipt_bundle).
+function receiptDetailHtml(id, d) {
+  const r = d.receipt, a = d.audit || {};
+  const items = (r.items || []).map(it => `<tr>
+    <td>${esc(it.name || '—')}</td><td class="num">${it.quantity ?? ''}</td>
+    <td class="num">${money(it.unit_price)}</td><td class="num">${money(it.line_price)}</td></tr>`).join('')
+    || `<tr><td colspan="4" class="muted">Aucun article enregistré.</td></tr>`;
+  const chips = chip('Lignes / sous-total', a.line_sum_ok ?? null)
+    + chip('Sous-total + taxe / total', a.total_ok ?? null)
+    + chip('Taux de taxe plausible', a.tax_ok ?? null)
+    + chip("Équilibre de l'écriture", d.balanced ?? null);
+  const journal = d.journal ? d.journal.map(l => `<tr>
+    <td style="color:var(--primary);font-weight:500">${esc(l.account)}</td>
+    <td>${esc(l.label)}</td><td class="num">${money(l.debit)}</td>
+    <td class="num">${money(l.credit)}</td></tr>`).join('')
+    : `<tr><td colspan="4" class="muted">Écriture impossible : montants insuffisants.</td></tr>`;
+  return `
+    <div class="btn-row" style="margin-bottom:var(--md)">
+      <button class="btn" id="detail-back">← Retour</button></div>
+    <div class="card"><div class="section-head">
+      <span class="label-caps">Reçu #${esc(id)}${d.category ? ' — ' + esc(d.category) : ''}</span></div>
+      <div class="section-body muted body-sm">Reçu enregistré — aucune image conservée (données en mémoire de session).</div></div>
+    <div class="card"><div class="section-head"><span class="label-caps">Articles</span></div>
+      <table><thead><tr><th>Article</th><th class="num">Qté</th><th class="num">Prix unit.</th>
+        <th class="num">Total ligne</th></tr></thead><tbody>${items}</tbody></table>
+      <div class="section-body tabular">Sous-total : ${money(r.subtotal)} · Taxe : ${money(r.tax)} · Total : ${money(r.total)}</div></div>
+    <div class="card"><div class="section-head"><span class="label-caps">Contrôles</span></div>
+      <div class="section-body">${chips}</div></div>
+    <div class="card"><div class="section-head"><span class="label-caps">Écriture comptable</span></div>
+      <table><thead><tr><th>Compte</th><th>Libellé</th><th class="num">Débit</th><th class="num">Crédit</th></tr></thead>
+        <tbody>${journal}</tbody></table></div>`;
+}
+
+// Composant liste de reçus cliquables, réutilisé (Dashboard + listes filtrées).
+function receiptRowHtml(r) {
+  return `<tr class="receipt-open" data-id="${r.receipt_id}" title="Voir le détail du reçu">
+    <td><b>#${r.receipt_id}</b></td><td>${esc(r.category || '—')}</td>
+    <td class="num">${r.n_items}</td><td class="num">${money(r.total)}</td>
+    <td>${r.anomaly ? '⚠️ à revoir' : '✅'}</td></tr>`;
+}
+function receiptsListCard(receipts, title) {
+  if (!receipts || !receipts.length) return '';
+  return `<div class="card">
+    <div class="section-head"><span class="label-caps">${esc(title)} (${receipts.length})</span>
+      <span class="muted body-sm">Cliquez une ligne pour voir le détail</span></div>
+    <table><thead><tr><th>Reçu</th><th>Catégorie</th><th class="num">Articles</th>
+      <th class="num">Total</th><th>Contrôle</th></tr></thead>
+      <tbody>${receipts.map(receiptRowHtml).join('')}</tbody></table></div>`;
+}
+// Délégation d'événement sur un conteneur : tout élément .receipt-open (ligne,
+// carte d'anomalie, groupe de journal…) ouvre le détail, avec le bon retour.
+function wireReceiptOpen(container, restore) {
+  container.onclick = (e) => {
+    const el = e.target.closest('.receipt-open');
+    if (el && container.contains(el)) openReceiptDetail(el.dataset.id, container, restore);
+  };
 }
 
 // État vide du tableau de bord : 4 KPI à zéro grisés + CTA + mention démo.
@@ -584,7 +593,7 @@ async function renderAccounting() {
     }
     const v = d.vat, rep = d.report;
     const reasons = Object.entries(v.non_recoverable_reasons || {}).map(([r, det]) =>
-      `<div class="muted body-sm">• ${esc(r)} : ${det.count} reçu(s), ${money(det.amount)}</div>`).join('');
+      `<div class="body-sm reason-link" data-reason="${esc(r)}" title="Voir les reçus concernés">• ${esc(r)} : ${det.count} reçu(s), ${money(det.amount)} →</div>`).join('');
 
     const vatCard = `<div class="card"><div class="section-head"><span class="label-caps">TVA — ${esc(d.period)}</span></div>
       <div class="section-body grid-2">
@@ -601,7 +610,7 @@ async function renderAccounting() {
 
     const rows = d.journal.slice(0, 100).map(g => g.lines.map((l, i) => `
       <tr class="${g.balanced ? '' : 'unbalanced'}">
-        ${i === 0 ? `<td rowspan="${g.lines.length}"><b>#${g.receipt_id}</b> ${g.balanced ? '✅' : '❌'}</td>` : ''}
+        ${i === 0 ? `<td rowspan="${g.lines.length}" class="receipt-open" data-id="${g.receipt_id}" title="Voir le détail du reçu"><b>#${g.receipt_id}</b> ${g.balanced ? '✅' : '❌'}</td>` : ''}
         <td>${esc(l.account)}</td><td>${esc(l.label)}</td>
         <td class="num">${money(l.debit)}</td><td class="num">${money(l.credit)}</td></tr>`).join('')).join('');
     const journalCard = `<div class="card"><div class="section-head"><span class="label-caps">Journal général, groupé par reçu</span>
@@ -613,9 +622,28 @@ async function renderAccounting() {
     const disclaimer = `<p class="muted body-sm">ℹ️ ${esc(d.disclaimer)}</p>`;
     body.innerHTML = vatCard + reportCard + journalCard + disclaimer;
     $('#export-journal').onclick = () => exportJournalCsv(d.journal);
+    // Groupes de journal cliquables -> détail (retour = comptabilité).
+    wireReceiptOpen(body, renderAccounting);
+    // Motif TVA cliquable -> liste filtrée des reçus concernés.
+    $$('.reason-link', body).forEach(el => {
+      el.onclick = () => renderFilteredReceipts(el.dataset.reason, d);
+    });
   } catch (e) {
     body.innerHTML = `<div class="error-box">${esc(e.message)}</div>`;
   }
+}
+
+// Liste filtrée par motif TVA : réutilise le composant liste du Dashboard.
+// Retour depuis un détail -> revient à CETTE liste filtrée (pas au Dashboard).
+function renderFilteredReceipts(reason, d) {
+  const body = $('#accounting-body');
+  const filtered = (d.receipts || []).filter(r => r.vat_reason === reason);
+  body.innerHTML = `
+    <div class="btn-row" style="margin-bottom:var(--md)"><button class="btn" id="filter-back">← Retour à la comptabilité</button></div>
+    <div class="card"><div class="section-body"><b>Reçus — motif :</b> ${esc(reason)} <span class="muted">(${filtered.length})</span></div></div>
+    ${receiptsListCard(filtered, 'Reçus concernés')}`;
+  $('#filter-back').onclick = renderAccounting;
+  wireReceiptOpen(body, () => renderFilteredReceipts(reason, d));
 }
 
 function exportJournalCsv(journal) {
@@ -669,12 +697,16 @@ async function doAsk() {
         : `D'après les reçus les plus pertinents pour : <i>${esc(q)}</i>.` +
           (state.config.groq_configured ? '' : ` <span class="muted body-sm">(réponse LLM désactivée : aucune clé Groq)</span>`)}</div></div>`;
     const sources = `<div class="card"><div class="section-head"><span class="label-caps">Reçus sources — la réponse est fondée sur eux (RAG)</span></div>
-      <div class="section-body stack">${d.sources.map(s => `
-        <div class="card"><div class="section-body">
+      <div class="section-body stack">${d.sources.map(s => {
+        const clickable = s.receipt_id != null;   // reçu présent dans la session -> cliquable
+        return `<div class="card${clickable ? ' receipt-open' : ''}"${clickable ? ` data-id="${s.receipt_id}" title="Voir le détail de ce reçu"` : ''}><div class="section-body">
           <span class="score">Pertinence ${(s.score * 100).toFixed(0)}%</span>
           <div class="bar-track" style="margin:6px 0"><span class="bar-fill" style="width:${Math.max(0, Math.min(100, s.score * 100))}%"></span></div>
-          ${esc(s.text)}</div></div>`).join('')}</div></div>`;
+          ${esc(s.text)}${clickable ? ' <span class="muted body-sm">— cliquer pour le détail</span>' : ''}</div></div>`;
+      }).join('')}</div></div>`;
     body.innerHTML = answer + sources;
+    // Retour depuis un détail = relancer la recherche (input conservé) -> revient à Ask.
+    wireReceiptOpen($('#ask-body'), doAsk);
     state.askHistory.unshift(q);
     renderAskHistory();
   } catch (e) {

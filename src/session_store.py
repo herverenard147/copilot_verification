@@ -83,7 +83,8 @@ class UserSession:
             self.items.append({
                 "receipt_id": rid, "name": it.get("name"), "quantity": it.get("quantity"),
                 "unit_price": it.get("unit_price"), "line_price": it.get("line_price"),
-                "category": category,
+                # categorie PAR article si presente, sinon celle du recu (retro-compat)
+                "category": it.get("category") or category,
             })
         self.receipts.append({
             "receipt_id": rid, "n_items": len(receipt.items),
@@ -172,24 +173,43 @@ class UserSession:
         if receipts.empty:
             return {"empty": True}
 
-        vat_records, journal_groups = [], []
+        # articles par recu (avec leur categorie individuelle) pour l'ecriture
+        # multi-comptes -- voir journal_entry / _charge_lines.
+        items_by_id = {}
+        for it in self.items:
+            items_by_id.setdefault(int(it["receipt_id"]), []).append({
+                "name": it.get("name"), "quantity": it.get("quantity"),
+                "unit_price": it.get("unit_price"), "line_price": _nan(it.get("line_price")),
+                "category": _nan(it.get("category")),
+            })
+
+        vat_records, journal_groups, receipts_list = [], [], []
         for _, row in receipts.iterrows():
+            rid = int(row["receipt_id"])
             merchant = _nan(row.get("merchant"))
-            r = Receipt(items=[], subtotal=_nan(row.get("subtotal")), tax=_nan(row.get("tax")),
-                        total=_nan(row.get("total")), receipt_id=row["receipt_id"])
+            r = Receipt(items=items_by_id.get(rid, []),
+                        subtotal=_nan(row.get("subtotal")), tax=_nan(row.get("tax")),
+                        total=_nan(row.get("total")), receipt_id=rid)
             recoverable, reason = vat_recoverable(r, merchant=merchant)
             vat_records.append({"tax": r.tax or 0, "recoverable": recoverable, "reason": reason})
+            # Résumé cliquable + motif TVA, pour filtrer la liste par motif.
+            receipts_list.append({
+                "receipt_id": rid, "category": _nan(row.get("category")),
+                "total": _nan(row.get("total")), "n_items": int(row.get("n_items") or 0),
+                "anomaly": bool(row.get("anomaly")) if row.get("anomaly") is not None else False,
+                "vat_reason": reason,
+            })
             try:
                 entry = journal_entry(r, category=_nan(row.get("category")),
                                       payment_mode=payment_mode, country=country, merchant=merchant)
-                journal_groups.append({"receipt_id": int(row["receipt_id"]),
+                journal_groups.append({"receipt_id": rid,
                                        "balanced": is_balanced(entry), "lines": entry})
             except (ValueError, KeyError):
                 continue
 
         return {"empty": False, "period": period, "vat": vat_summary(vat_records),
                 "report": expense_report(receipts, period), "journal": journal_groups,
-                "disclaimer": DISCLAIMER}
+                "receipts": receipts_list, "disclaimer": DISCLAIMER}
 
     def search_texts(self):
         """Un resume textuel par recu utilisateur, pour la recherche semantique."""

@@ -170,9 +170,11 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--p
 }
 .demo-banner .btn--ghost:hover { background: rgba(255, 255, 255, .12); }
 
-/* Ligne de reçu cliquable (détail au clic) */
-.receipt-row { cursor: pointer; }
-.receipt-row:hover { background: var(--surface-low); }
+/* Éléments cliquables ouvrant le détail d'un reçu (lignes, cartes, motifs) */
+.receipt-open { cursor: pointer; }
+.receipt-open:hover { background: var(--surface-low); }
+.reason-link { cursor: pointer; color: var(--primary); }
+.reason-link:hover { text-decoration: underline; }
 
 /* KPI grisés (état vide du tableau de bord) */
 .kpi--muted .value { color: var(--outline-variant); }

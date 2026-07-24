@@ -12,6 +12,7 @@ import io
 import logging
 import math
 import os
+import re
 from pathlib import Path
 from uuid import uuid4
 
@@ -387,6 +388,7 @@ def api_validate(payload: ValidatePayload, request: Request):
             "quantity": it.get("quantity"),
             "unit_price": it.get("unit_price"),
             "line_price": it.get("line_price"),
+            "category": it.get("category"),   # categorie par article (si fournie) -> compte
         })
     receipt = Receipt(items=items, subtotal=payload.subtotal, tax=payload.tax,
                       total=payload.total)
@@ -443,7 +445,8 @@ def api_receipt(receipt_id: int, request: Request, country: str = "CI",
                     suggestions=["Revenir au tableau de bord"])
     receipt = Receipt(
         items=[{"name": it.get("name"), "quantity": it.get("quantity"),
-                "unit_price": it.get("unit_price"), "line_price": it.get("line_price")}
+                "unit_price": it.get("unit_price"), "line_price": it.get("line_price"),
+                "category": _nan(it.get("category"))}   # categorie par article -> compte
                for it in items],
         subtotal=_nan(row.get("subtotal")), tax=_nan(row.get("tax")),
         total=_nan(row.get("total")), receipt_id=receipt_id)
@@ -511,7 +514,19 @@ def api_search(payload: SearchPayload, request: Request):
         corpus_note = ("Corpus de référence CORD — ce ne sont pas vos dépenses. "
                        "Analysez un reçu pour interroger les vôtres.")
 
-    sources = [{"text": t, "score": float(s)} for t, s in results]
+    # receipt_id resolu depuis le texte ("Reçu #N" ou "Reçu N :") UNIQUEMENT si
+    # ce reçu existe dans la session -> source cliquable vers son détail. Les
+    # sources du corpus de référence (session vide) ne pointent sur rien.
+    session_ids = {int(r["receipt_id"]) for r in session.receipts}
+
+    def _source_id(text):
+        m = re.match(r"Reçu\s*#?(\d+)", text)
+        if not m:
+            return None
+        rid = int(m.group(1))
+        return rid if rid in session_ids else None
+
+    sources = [{"text": t, "score": float(s), "receipt_id": _source_id(t)} for t, s in results]
 
     answer, llm_used = None, False
     groq_key = resolve_key("groq")[0]

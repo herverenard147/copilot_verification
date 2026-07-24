@@ -100,6 +100,51 @@ def _resolve_amounts(receipt):
     return float(total), tax
 
 
+def _charge_line(account, merchant_label, amount):
+    return {
+        "account": account,
+        "label": f"{CHART_OF_ACCOUNTS.get(account, 'Charge')} — {merchant_label}",
+        "debit": round(amount, 2),
+        "credit": 0.0,
+    }
+
+
+def _charge_lines(receipt, receipt_category, charge_amount, merchant_label):
+    """Repartit le montant de charge en UNE ligne PAR COMPTE distinct.
+
+    Chaque article est mappe vers un compte via SA categorie individuelle
+    (`item["category"]`), avec repli sur la categorie globale du recu si
+    l'article n'en a pas. Le montant de charge est ventile entre les comptes au
+    PRORATA des prix de ligne, la derniere ligne absorbant l'arrondi pour que la
+    somme des debits egale exactement `charge_amount` (is_balanced preserve).
+
+    Repli historique : si aucun article chiffre (pas de line_price), une seule
+    ligne sur la categorie globale du recu -- ancien comportement, ne plante pas.
+    """
+    priced = [(it.get("category") or receipt_category, it["line_price"])
+              for it in receipt.items if it.get("line_price") is not None]
+    items_sum = sum(lp for _, lp in priced)
+
+    if not priced or items_sum <= 0:
+        return [_charge_line(map_category_to_account(receipt_category), merchant_label, charge_amount)]
+
+    by_account = {}
+    for category, line_price in priced:
+        account = map_category_to_account(category)
+        by_account[account] = by_account.get(account, 0.0) + line_price
+
+    lines, allocated = [], 0.0
+    accounts = sorted(by_account)                      # ordre stable et deterministe
+    for i, account in enumerate(accounts):
+        if i < len(accounts) - 1:
+            amount = round(charge_amount * by_account[account] / items_sum, 2)
+            allocated += amount
+        else:
+            amount = round(charge_amount - allocated, 2)   # derniere ligne : absorbe l'arrondi
+        lines.append(_charge_line(account, merchant_label, amount))
+    return lines
+
+
 def journal_entry(receipt, category, payment_mode="cash", country="CI", merchant=None):
     """Construit l'ecriture comptable d'un recu -> liste de lignes
     {account, label, debit, credit}.
@@ -125,15 +170,11 @@ def journal_entry(receipt, category, payment_mode="cash", country="CI", merchant
     recoverable = min(recoverable, tax)   # jamais plus que la taxe reellement lue
     charge_amount = total_ttc - recoverable   # HT si recuperable, TTC (reintegre) sinon
 
-    account = map_category_to_account(category)
     merchant_label = merchant or "fournisseur non identifie"
 
-    lines = [{
-        "account": account,
-        "label": f"{CHART_OF_ACCOUNTS.get(account, 'Charge')} — {merchant_label}",
-        "debit": round(charge_amount, 2),
-        "credit": 0.0,
-    }]
+    # Une ligne de charge PAR COMPTE distinct : chaque article part sur le compte
+    # de SA categorie (un reçu peut melanger marchandises et transport).
+    lines = _charge_lines(receipt, category, charge_amount, merchant_label)
 
     if recoverable > 0:
         lines.append({

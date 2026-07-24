@@ -264,6 +264,36 @@ def test_mode_demo_charge_cord_et_leve_le_drapeau():
     assert d["kpis"]["n_receipts"] > 100
 
 
+def test_accounting_expose_receipts_avec_motif_tva():
+    """Chantier 2.3b : la compta expose une liste de reçus + motif TVA, pour
+    filtrer par motif côté front."""
+    sid = {"X-Session-Id": "compta"}
+    payload = {"items": [{"name": "x", "line_price": 5000, "category": "food"}],
+               "subtotal": 5000, "total": 5000, "category": "food",
+               "country": "CI", "persist": True}
+    client.post("/api/validate", json=payload, headers=sid)
+    d = client.get("/api/accounting", headers=sid).json()
+    assert d["empty"] is False
+    assert isinstance(d["receipts"], list) and len(d["receipts"]) == 1
+    r = d["receipts"][0]
+    assert r["receipt_id"] == 0 and "identifi" in r["vat_reason"].lower()
+
+
+def test_receipt_detail_multi_comptes_apres_validation():
+    """Chantier 1+2 : un reçu validé multi-catégories -> détail à écriture
+    multi-comptes (cohérence entre validation et détail persisté)."""
+    sid = {"X-Session-Id": "multi2"}
+    payload = {"items": [{"name": "papier", "line_price": 30000, "category": "supplies"},
+                         {"name": "taxi", "line_price": 20000, "category": "transport"}],
+               "subtotal": 50000, "total": 50000, "category": "supplies",
+               "country": "CI", "persist": True}
+    client.post("/api/validate", json=payload, headers=sid)
+    d = client.get("/api/receipt/0", headers=sid).json()
+    charge = [l for l in d["journal"] if l["debit"] > 0]
+    assert {l["account"] for l in charge} == {"605", "6181"}   # 2 comptes distincts
+    assert d["balanced"] is True
+
+
 def test_delete_session_revient_a_vide():
     sid = {"X-Session-Id": "a-vider"}
     client.post("/api/settings/demo", json={"enabled": True}, headers=sid)
