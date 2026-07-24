@@ -749,7 +749,7 @@ function wireDemo() {
 const GROQ_SS_KEY = 'copilote.groqKey';
 
 const KEY_STATUS_LABEL = {
-  env: '✅ Configurée (env)',
+  env: "✅ Configurée (variable d'environnement) — saisissez une clé pour la remplacer",
   session: '✅ Configurée (session)',
   none: '➖ Non configurée — recherche sémantique seule',
 };
@@ -771,11 +771,12 @@ async function refreshKeyStatus() {
     }
     el.textContent = KEY_STATUS_LABEL[src] || src;
     state.config.groq_configured = src !== 'none';
-    const envLocked = src === 'env';
-    input.disabled = envLocked;
-    input.placeholder = envLocked ? "Fournie par l'environnement (prioritaire)" : 'gsk_…';
-    $('#btn-key-save').disabled = envLocked;
-    $('#btn-key-clear').disabled = envLocked;
+    // Aucun verrouillage : une clé de session peut toujours remplacer l'env,
+    // et « Effacer » retire l'éventuelle clé de session (retour à l'env/none).
+    input.disabled = false;
+    input.placeholder = 'gsk_…';
+    $('#btn-key-save').disabled = false;
+    $('#btn-key-clear').disabled = false;
   } catch (e) {
     el.textContent = 'État indisponible.';
   }

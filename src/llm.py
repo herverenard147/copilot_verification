@@ -74,14 +74,20 @@ def _env_key(provider):
 
 
 def resolve_key(provider="groq"):
-    """Retourne (cle, source) selon la priorite env > session > absent.
-    source vaut "env", "session" ou "none". Ne journalise jamais la cle."""
-    env = _env_key(provider)
-    if env:
-        return env, "env"
+    """Retourne (cle, source) selon la priorite SESSION > env > absent.
+
+    La cle saisie dans l'interface (session) l'emporte sur la variable
+    d'environnement : l'utilisateur peut ainsi la CHANGER ou l'EFFACER depuis
+    Reglages, meme si GROQ_API_KEY est definie (qui sert alors de defaut). Sans
+    ce choix, une cle d'env rendait l'UI en lecture seule -> impossible de la
+    modifier (bug signale). Endpoints locaux uniquement (mono-utilisateur).
+    source vaut "session", "env" ou "none". Ne journalise jamais la cle."""
     session = _session_keys.get(provider)
     if session:
         return session, "session"
+    env = _env_key(provider)
+    if env:
+        return env, "env"
     return None, "none"
 
 

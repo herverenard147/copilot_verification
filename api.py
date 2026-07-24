@@ -627,10 +627,8 @@ def api_set_apikey(payload: ApiKeyPayload, request: Request):
         return fail("Fournisseur non pris en charge.",
                     detail="Seule la cle Groq est configurable ici.",
                     status=422, engine="settings")
-    # Cle d'environnement prioritaire : on ne l'ecrase pas.
-    if key_source(provider) == "env":
-        return ok({"provider": provider, "source": "env", "configured": True,
-                   "note": "Cle fournie par l'environnement (prioritaire) — non modifiable ici."})
+    # La cle de session l'emporte sur l'env (voir resolve_key) : on la stocke
+    # meme si GROQ_API_KEY est definie, pour que l'utilisateur garde la main.
     key = (payload.key or "").strip()
     if not key or any(c.isspace() for c in key) or len(key) < 10:
         return fail("Cle vide ou invalide.",

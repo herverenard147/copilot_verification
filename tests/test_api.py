@@ -160,17 +160,34 @@ def test_apikey_delete_puis_status_none(clean_keys):
     assert client.get("/api/settings/status").json()["groq"] == {"source": "none", "configured": False}
 
 
-def test_env_prioritaire_et_post_ne_lecrase_pas(clean_keys, monkeypatch):
+def test_env_est_un_defaut_que_la_session_remplace(clean_keys, monkeypatch):
+    """La cle de session l'emporte sur l'env (l'utilisateur garde la main) ;
+    l'env sert de defaut quand aucune cle de session n'est configuree."""
     monkeypatch.setenv("GROQ_API_KEY", "gsk_env_key_abcdefgh")
     assert client.get("/api/settings/status").json()["groq"]["source"] == "env"
 
-    r = client.post("/api/settings/apikey", json={"provider": "groq", "key": "gsk_session_override_x"})
-    assert r.status_code == 200
-    assert r.json()["source"] == "env"        # non ecrasee
+    # une cle saisie dans l'UI REMPLACE l'env (plus de verrou lecture seule)
+    r = client.post("/api/settings/apikey", json={"provider": "groq", "key": "gsk_session_override_1"})
+    assert r.status_code == 200 and r.json()["source"] == "session"
+    assert client.get("/api/settings/status").json()["groq"]["source"] == "session"
 
-    # une fois l'env retiree, rien n'a ete stocke en session
-    monkeypatch.delenv("GROQ_API_KEY")
-    assert client.get("/api/settings/status").json()["groq"]["source"] == "none"
+    # « Effacer » retire la cle de session -> retour au defaut d'environnement
+    client.delete("/api/settings/apikey?provider=groq")
+    assert client.get("/api/settings/status").json()["groq"]["source"] == "env"
+
+
+def test_apikey_changer_puis_effacer_puis_reconfigurer(clean_keys):
+    """Regression du bug "clé non modifiable/effaçable" (sans env) :
+    POST A -> DELETE -> POST B : le status reflete B, jamais A ni un etat bloque."""
+    client.post("/api/settings/apikey", json={"provider": "groq", "key": "gsk_key_A_1234567890"})
+    assert client.get("/api/settings/status").json()["groq"]["source"] == "session"
+
+    assert client.delete("/api/settings/apikey?provider=groq").status_code == 200
+    assert client.get("/api/settings/status").json()["groq"] == {"source": "none", "configured": False}
+
+    client.post("/api/settings/apikey", json={"provider": "groq", "key": "gsk_key_B_1234567890"})
+    st = client.get("/api/settings/status").json()["groq"]
+    assert st == {"source": "session", "configured": True}   # reflete B, pas d'etat bloque
 
 
 def test_apikey_vide_ou_malformee_erreur_propre(clean_keys):
