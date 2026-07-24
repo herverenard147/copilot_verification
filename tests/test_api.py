@@ -13,12 +13,22 @@ from PIL import Image
 
 import api
 import src.llm as llm
+from src import session_store
+from src.llm import VisionUnavailable
 
 # raise_server_exceptions=False : si une erreur passait entre les mailles, le
 # test verrait la reponse (jamais une exception) -- c'est justement ce qu'on garantit.
 client = TestClient(api.app, raise_server_exceptions=False)
 
 VALID_KEY = "gsk_test_key_1234567890"     # forme plausible, jamais envoyee a Groq
+
+
+@pytest.fixture(autouse=True)
+def _reset_sessions():
+    """Chaque test part d'un registre de sessions vierge (global de module)."""
+    session_store.reset_all()
+    yield
+    session_store.reset_all()
 
 
 @pytest.fixture
@@ -155,3 +165,92 @@ def test_apikey_ne_cree_aucun_fichier(clean_keys):
 
     assert {p.name for p in root.iterdir()} == before_root
     assert {p.name for p in data.iterdir()} == before_data
+
+
+# ---------------------------------------------------------------------------
+# Cloisonnement par session : donnees utilisateur vs corpus de reference CORD
+# ---------------------------------------------------------------------------
+def test_dashboard_session_neuve_compteurs_a_zero():
+    r = client.get("/api/dashboard", headers={"X-Session-Id": "neuve"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["success"] is True and body["empty"] is True and body["demo_mode"] is False
+
+
+def test_validate_ajoute_le_recu_a_cette_session():
+    sid = {"X-Session-Id": "avec-recu"}
+    payload = {"items": [{"name": "Café", "line_price": 1500}], "subtotal": 1500,
+               "tax": None, "total": 1500, "category": "food",
+               "country": "ID", "payment_mode": "cash", "persist": True}
+    v = client.post("/api/validate", json=payload, headers=sid)
+    assert v.status_code == 200 and v.json()["persisted"] is True
+
+    d = client.get("/api/dashboard", headers=sid).json()
+    assert d["empty"] is False
+    assert d["kpis"]["n_receipts"] == 1
+
+
+def test_deux_sessions_sont_isolees():
+    a, b = {"X-Session-Id": "sess-A"}, {"X-Session-Id": "sess-B"}
+    payload = {"items": [], "subtotal": 1000, "tax": None, "total": 1000,
+               "category": "food", "country": "ID", "persist": True}
+    client.post("/api/validate", json=payload, headers=a)
+
+    da = client.get("/api/dashboard", headers=a).json()
+    db = client.get("/api/dashboard", headers=b).json()
+    assert da["empty"] is False and da["kpis"]["n_receipts"] == 1
+    assert db["empty"] is True     # aucune fuite de A vers B
+
+
+def test_mode_demo_charge_cord_et_leve_le_drapeau():
+    sid = {"X-Session-Id": "demo"}
+    r = client.post("/api/settings/demo", json={"enabled": True}, headers=sid)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["demo_mode"] is True and body["n_receipts"] > 100   # corpus CORD
+
+    d = client.get("/api/dashboard", headers=sid).json()
+    assert d["empty"] is False and d["demo_mode"] is True
+    assert d["kpis"]["n_receipts"] > 100
+
+
+def test_delete_session_revient_a_vide():
+    sid = {"X-Session-Id": "a-vider"}
+    client.post("/api/settings/demo", json={"enabled": True}, headers=sid)
+    r = client.delete("/api/session", headers=sid)
+    assert r.status_code == 200 and r.json()["empty"] is True
+
+    d = client.get("/api/dashboard", headers=sid).json()
+    assert d["empty"] is True and d["demo_mode"] is False
+
+
+def test_technical_inchange_quelle_que_soit_la_session():
+    r1 = client.get("/api/technical", headers={"X-Session-Id": "t-vide"}).json()
+    client.post("/api/settings/demo", json={"enabled": True}, headers={"X-Session-Id": "t-demo"})
+    r2 = client.get("/api/technical", headers={"X-Session-Id": "t-demo"}).json()
+    assert r1["success"] and r2["success"]
+    assert r1["results"] == r2["results"]      # donnees d'EVALUATION, jamais de la session
+    assert any("Donut" in str(row.get("modele", "")) for row in r1["results"])
+
+
+# ---------------------------------------------------------------------------
+# Fallback vision : cle valide mais aucun modele vision -> degradation propre
+# ---------------------------------------------------------------------------
+def test_extract_sans_modele_vision_ne_plante_pas(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_env_key_abcdefgh")   # cle presente
+    monkeypatch.setattr(api, "get_donut", lambda: (None, None, "cpu"))
+    monkeypatch.setattr(api, "extract", lambda *a, **k: {})       # Donut vide (hors domaine)
+
+    def _no_vision(*a, **k):
+        raise VisionUnavailable("aucun modele vision accessible")
+    monkeypatch.setattr(api, "extract_receipt_via_vision", _no_vision)
+
+    r = client.post("/api/extract",
+                    files={"file": ("recu.png", png_bytes(), "image/png")},
+                    data={"country": "CI", "payment_mode": "cash"},
+                    headers={"X-Session-Id": "vision"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["success"] is True
+    assert body["engine"] == "fallback_indisponible"            # engine indique l'indisponibilite
+    assert "indisponible" in (body.get("fallback_note") or "").lower()

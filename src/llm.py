@@ -21,12 +21,30 @@ _backend = None
 _client = None
 _model_name = None
 
-# Modele vision Groq. Surchargeable par variable d'environnement car la
-# disponibilite des modeles Groq evolue ; en cas de nom invalide, le fallback
-# echoue proprement (capte par l'appelant) au lieu de planter.
-DEFAULT_VISION_MODEL = os.environ.get(
-    "GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"
-)
+# Modeles vision Groq candidats, par ORDRE DE PREFERENCE. On ne code plus un
+# nom en dur : la disponibilite des modeles Groq evolue (un nom code en dur a
+# provoque des 404 model_not_found). On interroge l'API des modeles et on
+# retient le premier candidat REELLEMENT present pour la cle courante. Une
+# surcharge explicite reste possible via GROQ_VISION_MODEL (placee en tete).
+_VISION_MODEL_CANDIDATES = [
+    "meta-llama/llama-4-maverick-17b-128e-instruct",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "llama-3.2-90b-vision-preview",
+    "llama-3.2-11b-vision-preview",
+]
+
+# Indices de nom permettant de reconnaitre un modele multimodal dans la liste
+# renvoyee par l'API (pour l'affichage GET /api/settings/models).
+_VISION_HINTS = ("vision", "scout", "maverick", "llama-4")
+
+
+class VisionUnavailable(RuntimeError):
+    """Le fallback vision ne peut pas s'executer : aucun modele multimodal
+    n'est accessible avec la cle courante. Signale a l'appelant pour une
+    degradation gracieuse (pas un 404 silencieux)."""
+
+
+_model_list_cache = {}   # cle -> [ids de modeles], duree du processus
 
 # ---------------------------------------------------------------------------
 # Resolution des cles API : SOURCE UNIQUE de verite (env > session > absent).
@@ -86,6 +104,50 @@ def set_session_key(provider, key):
 def clear_session_key(provider):
     """Efface la cle de session (aucun effet sur une eventuelle cle d'env)."""
     _session_keys.pop(provider, None)
+    _model_list_cache.clear()   # la liste de modeles depend de la cle
+
+
+# ---------------------------------------------------------------------------
+# Modeles disponibles pour la cle courante (interrogation + selection vision)
+# ---------------------------------------------------------------------------
+def list_available_models(provider="groq", force=False):
+    """IDs de modeles disponibles pour la cle courante, en cache pour la duree
+    du processus (par valeur de cle). Leve RuntimeError sans cle. Les erreurs
+    reseau/SDK remontent a l'appelant."""
+    key, _ = resolve_key(provider)
+    if not key:
+        raise RuntimeError("Aucune cle : impossible de lister les modeles")
+    if not force and key in _model_list_cache:
+        return _model_list_cache[key]
+    from groq import Groq
+    response = Groq(api_key=key).models.list()
+    ids = sorted(m.id for m in response.data)
+    _model_list_cache[key] = ids
+    return ids
+
+
+def select_vision_model(provider="groq"):
+    """1er modele vision REELLEMENT disponible selon l'ordre de preference,
+    ou None si aucun candidat n'est present pour cette cle. Une surcharge
+    GROQ_VISION_MODEL est essayee en priorite."""
+    available = set(list_available_models(provider))
+    override = os.environ.get("GROQ_VISION_MODEL")
+    candidates = ([override] if override else []) + _VISION_MODEL_CANDIDATES
+    for name in candidates:
+        if name in available:
+            return name
+    return None
+
+
+def classify_models(provider="groq"):
+    """Separe les modeles disponibles en {vision, text} pour l'affichage
+    Reglages. La detection vision s'appuie sur les candidats connus + des
+    indices de nom (vision/scout/maverick/llama-4)."""
+    ids = list_available_models(provider)
+    known = set(_VISION_MODEL_CANDIDATES)
+    vision = [m for m in ids if m in known or any(h in m.lower() for h in _VISION_HINTS)]
+    text = [m for m in ids if m not in vision]
+    return {"vision": vision, "text": text}
 
 
 def init_llm(backend="groq", api_key=None, model_name=None):
@@ -228,9 +290,15 @@ def extract_receipt_via_vision(image, api_key=None, model=None):
     if not api_key:
         raise RuntimeError("Aucune cle Groq : fallback vision indisponible")
 
+    if model is None:
+        model = select_vision_model("groq")
+        if model is None:
+            raise VisionUnavailable(
+                "Aucun modele vision accessible avec cette cle Groq"
+            )
+
     from groq import Groq
     client = Groq(api_key=api_key)
-    model = model or DEFAULT_VISION_MODEL
     data_uri = _pil_to_data_uri(image)
 
     response = client.chat.completions.create(

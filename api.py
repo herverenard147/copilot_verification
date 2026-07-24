@@ -13,6 +13,7 @@ import logging
 import math
 import os
 from pathlib import Path
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
@@ -33,20 +34,52 @@ from src.accounting import (
 from src.preprocess import preprocess_image
 from src.extractor import extract
 from src.llm import (
-    extract_receipt_via_vision,
+    extract_receipt_via_vision, VisionUnavailable,
     resolve_key, key_source, set_session_key, clear_session_key,
+    classify_models, select_vision_model,
 )
+from src import session_store
 
 DATA = Path("data")
 WEB = Path("web")
 
 app = FastAPI(title="Copilote de reçus — API")
 
+
+# ---------------------------------------------------------------------------
+# Identite de session (cookie httpOnly uuid4, ou header X-Session-Id).
+# Aucune auth : une session anonyme suffit. Le jour ou l'auth arrive, on
+# resout un user_id ici et session_store.get_session keye dessus -- rien
+# d'autre a changer.
+# ---------------------------------------------------------------------------
+SESSION_COOKIE = "sid"
+
+
+@app.middleware("http")
+async def ensure_session(request: Request, call_next):
+    # header prioritaire (clients API / tests), sinon cookie, sinon nouvel id
+    sid = request.headers.get("x-session-id") or request.cookies.get(SESSION_COOKIE)
+    fresh = None
+    if not sid:
+        sid = fresh = uuid4().hex
+    request.state.sid = sid
+    response = await call_next(request)
+    if fresh:
+        response.set_cookie(SESSION_COOKIE, fresh, httponly=True, samesite="lax")
+    return response
+
+
+def _session(request):
+    """La session utilisateur courante (creee a la volee si besoin)."""
+    return session_store.get_session(request.state.sid)
+
+
 # ---------------------------------------------------------------------------
 # Ressources lourdes en chargement PARESSEUX (jamais au demarrage)
 # ---------------------------------------------------------------------------
 _donut = None            # (processor, model, device)
 _search = None           # (encoder, index, summaries)
+_reference = None        # (receipts_ref, items_ref) — corpus CORD pour le mode demo
 
 
 def get_donut():
@@ -117,6 +150,18 @@ def load_receipts():
     return receipts
 
 
+def reference_dataset():
+    """Corpus de REFERENCE CORD (receipts + items enrichis), charge une fois.
+    Sert au mode demonstration et au repli de recherche -- JAMAIS presente
+    comme les depenses de l'utilisateur."""
+    global _reference
+    if _reference is None:
+        receipts = to_jsonable(load_receipts().to_dict("records"))
+        items = to_jsonable(load_items().to_dict("records"))
+        _reference = (receipts, items)
+    return _reference
+
+
 def to_jsonable(obj):
     """Rend un objet serialisable en JSON STRICT : NaN/NaT -> null, types numpy
     -> types Python. Sans ca, le JSON contiendrait des tokens `NaN` invalides
@@ -179,22 +224,6 @@ def _nan(value):
     """Case CSV vide (NaN pandas) -> None (NaN est truthy et casse la logique
     a 3 etats des regles)."""
     return None if value is None or (isinstance(value, float) and math.isnan(value)) else value
-
-
-def failing_rule(row):
-    """Quelle regle a echoue en premier + les deux valeurs a comparer.
-    Porte la meme logique que l'app Streamlit pour un affichage coherent."""
-    if row.get("line_sum_ok") is False or row.get("line_sum_ok") == False:  # noqa: E712
-        return ("Somme des lignes ≠ sous-total", "Somme des lignes",
-                _nan(row.get("items_sum")), "Sous-total déclaré", _nan(row.get("subtotal")))
-    if row.get("total_ok") is False or row.get("total_ok") == False:  # noqa: E712
-        subtotal_plus_tax = (_nan(row.get("subtotal")) or 0) + (_nan(row.get("tax")) or 0)
-        return ("Sous-total + taxe ≠ total", "Sous-total + taxe",
-                subtotal_plus_tax, "Total déclaré", _nan(row.get("total")))
-    if row.get("tax_ok") is False or row.get("tax_ok") == False:  # noqa: E712
-        return ("Taux de taxe suspect", "Taxe déclarée",
-                _nan(row.get("tax")), "Sous-total déclaré", _nan(row.get("subtotal")))
-    return ("Anomalie non classée", None, None, None, None)
 
 
 def build_receipt_bundle(receipt, country, payment_mode, merchant, category=None):
@@ -277,10 +306,20 @@ def api_extract(file: UploadFile = File(...), country: str = Form("CI"),
             vision_receipt = Receipt.from_gt_parse(vision_pred)
             if vision_receipt.items or vision_receipt.total:
                 prediction, receipt, engine = vision_pred, vision_receipt, "llm_fallback"
-        except Exception:
+        except VisionUnavailable:
+            # Aucun modele vision accessible : degradation gracieuse EXPLICITE
+            # (pas un 404 silencieux). On ne logue pas la cle.
+            fallback_note = ("Fallback vision indisponible — modèle non accessible "
+                             "avec cette clé.")
+            if (not receipt.items) and (not receipt.total):
+                engine = "fallback_indisponible"
+        except Exception as exc:
+            logger.warning("Fallback vision échoué : %s", type(exc).__name__)
             fallback_note = "Fallback vision indisponible (modèle ou quota Groq)."
+            if (not receipt.items) and (not receipt.total):
+                engine = "fallback_indisponible"
     elif want_fallback:
-        fallback_note = "Fallback vision non tenté : aucune clé GROQ_API_KEY configurée."
+        fallback_note = "Fallback vision non tenté : aucune clé Groq configurée."
 
     bundle = build_receipt_bundle(receipt, country, payment_mode, _nan(merchant))
     bundle.update({
@@ -295,7 +334,7 @@ def api_extract(file: UploadFile = File(...), country: str = Form("CI"),
 
 
 # ---------------------------------------------------------------------------
-# POST /api/validate  (recalcul live si persist=false, ecriture CSV si true)
+# POST /api/validate  (recalcul live si persist=false, ajout a la SESSION si true)
 # ---------------------------------------------------------------------------
 class ValidatePayload(BaseModel):
     items: list = []
@@ -312,7 +351,7 @@ class ValidatePayload(BaseModel):
 
 @app.post("/api/validate")
 @safe
-def api_validate(payload: ValidatePayload):
+def api_validate(payload: ValidatePayload, request: Request):
     # normalise les articles recus du front
     items = []
     for it in payload.items:
@@ -337,46 +376,16 @@ def api_validate(payload: ValidatePayload):
 
     bundle["persisted"] = False
 
+    # Persistance = ajout aux depenses de CETTE session (memoire seule, jamais
+    # sur disque : un correcteur qui clone n'herite pas des recus d'un autre).
     if payload.persist:
-        try:
-            new_id = _append_to_csv(receipt, payload.category, bundle["audit"])
-            bundle["persisted"] = True
-            bundle["receipt_id"] = new_id
-        except Exception:  # ne jamais renvoyer un traceback
-            logger.exception("Persistance CSV échouée")
-            return fail("Enregistrement impossible",
-                        detail="Le reçu a été vérifié mais n'a pas pu être sauvegardé.",
-                        status=422, engine="server",
-                        suggestions=["Réessayer plus tard"])
+        session = _session(request)
+        new_id = session.add_receipt(receipt, payload.category, bundle["audit"],
+                                     merchant=_nan(payload.merchant))
+        bundle["persisted"] = True
+        bundle["receipt_id"] = new_id
+        bundle["demo_mode"] = session.demo_mode
     return ok(bundle)
-
-
-def _append_to_csv(receipt, category, flags):
-    """Ajoute le recu valide a data/items.csv et data/receipts.csv."""
-    receipts = load_receipts()
-    items = load_items()
-    new_id = int(receipts["receipt_id"].max()) + 1 if len(receipts) else 0
-
-    item_rows = [{
-        "receipt_id": new_id, "name": it.get("name"), "quantity": it.get("quantity"),
-        "unit_price": it.get("unit_price"), "line_price": it.get("line_price"),
-        "category": category,
-    } for it in receipt.items]
-
-    receipt_row = {
-        "receipt_id": new_id, "n_items": len(receipt.items),
-        "items_sum": receipt.items_sum(), "subtotal": receipt.subtotal,
-        "tax": receipt.tax, "total": receipt.total,
-        "line_sum_ok": flags["line_sum_ok"], "total_ok": flags["total_ok"],
-        "tax_ok": flags["tax_ok"], "anomaly": flags["anomaly"], "category": category,
-    }
-
-    if item_rows:
-        items = pd.concat([items, pd.DataFrame(item_rows)], ignore_index=True)
-        items.to_csv(DATA / "items.csv", index=False)
-    receipts = pd.concat([receipts, pd.DataFrame([receipt_row])], ignore_index=True)
-    receipts.to_csv(DATA / "receipts.csv", index=False)
-    return new_id
 
 
 # ---------------------------------------------------------------------------
@@ -384,43 +393,12 @@ def _append_to_csv(receipt, category, flags):
 # ---------------------------------------------------------------------------
 @app.get("/api/dashboard")
 @safe
-def api_dashboard():
-    receipts = load_receipts()
-    items = load_items()
-    if receipts.empty:
-        return ok({"empty": True})
-
-    n_anomalies = int(receipts["anomaly"].sum()) if "anomaly" in receipts.columns else 0
-    kpis = {
-        "n_receipts": int(len(receipts)),
-        "n_items": int(len(items)),
-        "total_spend": float(receipts["total"].fillna(0).sum()),
-        "n_anomalies": n_anomalies,
-    }
-
-    by_category = []
-    if "category" in items.columns:
-        grouped = items.groupby("category")["line_price"].sum().sort_values(ascending=False)
-        by_category = [{"category": str(c), "total": float(v)} for c, v in grouped.items()]
-
-    totals = receipts["total"].dropna().to_numpy()
-    distribution = []
-    if len(totals):
-        counts, edges = np.histogram(totals, bins=10)
-        distribution = [{"range": f"{int(edges[i]):,}–{int(edges[i+1]):,}".replace(",", " "),
-                         "count": int(counts[i])} for i in range(len(counts))]
-
-    anomalies = []
-    if n_anomalies:
-        for _, row in receipts[receipts["anomaly"] == True].iterrows():  # noqa: E712
-            rule, la, va, lb, vb = failing_rule(row)
-            anomalies.append({
-                "receipt_id": int(row["receipt_id"]), "rule": rule,
-                "a_label": la, "a_value": va, "b_label": lb, "b_value": vb,
-            })
-
-    return ok({"empty": False, "kpis": kpis, "by_category": by_category,
-               "distribution": distribution, "anomalies": anomalies})
+def api_dashboard(request: Request):
+    # Donnees de CETTE session, PAS le corpus CORD de data/.
+    session = _session(request)
+    data = session.get_dashboard_data()
+    data["demo_mode"] = session.demo_mode
+    return ok(data)
 
 
 # ---------------------------------------------------------------------------
@@ -428,33 +406,13 @@ def api_dashboard():
 # ---------------------------------------------------------------------------
 @app.get("/api/accounting")
 @safe
-def api_accounting(period: str = "Mois en cours", payment_mode: str = "cash", country: str = "CI"):
-    receipts = load_receipts()
-    if receipts.empty:
-        return ok({"empty": True})
-
-    vat_records, journal_groups = [], []
-    for _, row in receipts.iterrows():
-        merchant = _nan(row.get("merchant"))
-        r = Receipt(items=[], subtotal=_nan(row.get("subtotal")), tax=_nan(row.get("tax")),
-                    total=_nan(row.get("total")), receipt_id=row["receipt_id"])
-        recoverable, reason = vat_recoverable(r, merchant=merchant)
-        vat_records.append({"tax": r.tax or 0, "recoverable": recoverable, "reason": reason})
-        try:
-            entry = journal_entry(r, category=_nan(row.get("category")),
-                                  payment_mode=payment_mode, country=country, merchant=merchant)
-            journal_groups.append({
-                "receipt_id": int(row["receipt_id"]),
-                "balanced": is_balanced(entry),
-                "lines": entry,
-            })
-        except (ValueError, KeyError):
-            continue
-
-    summary = vat_summary(vat_records)
-    report = expense_report(receipts, period)
-    return ok({"empty": False, "period": period, "vat": summary,
-               "report": report, "journal": journal_groups, "disclaimer": DISCLAIMER})
+def api_accounting(request: Request, period: str = "Mois en cours",
+                   payment_mode: str = "cash", country: str = "CI"):
+    # Comptabilise les recus de CETTE session, PAS le corpus CORD.
+    session = _session(request)
+    data = session.get_accounting_data(period, payment_mode, country)
+    data["demo_mode"] = session.demo_mode
+    return ok(data)
 
 
 # ---------------------------------------------------------------------------
@@ -466,20 +424,39 @@ class SearchPayload(BaseModel):
 
 @app.post("/api/search")
 @safe
-def api_search(payload: SearchPayload):
+def api_search(payload: SearchPayload, request: Request):
     question = (payload.question or "").strip()
     if not question:
         return fail("Question vide.", detail="Saisissez une question.", status=422,
                     engine="search", suggestions=["Poser une question"])
 
-    encoder, index, summaries = get_search()
+    encoder, ref_index, ref_summaries = get_search()
     if encoder is None:
         return ok({"search_available": False, "llm_used": False, "answer": None,
-                   "sources": [], "note": "Recherche sémantique indisponible "
+                   "sources": [], "scope": "none", "reference_corpus": False,
+                   "note": "Recherche sémantique indisponible "
                    "(FAISS / sentence-transformers non installés)."})
 
-    from src.semantic import search
-    results = search(question, encoder, index, summaries, k=5)
+    from src.semantic import search, build_index, embed
+    session = _session(request)
+
+    if session.demo_mode:
+        # Le mode demo EST le corpus CORD : on reutilise l'index precalcule.
+        results = search(question, encoder, ref_index, ref_summaries, k=5)
+        scope, reference_corpus, corpus_note = "user", False, None
+    elif not session.is_empty():
+        # Recherche dans les recus de l'utilisateur (peu nombreux : index a la volee).
+        texts = session.search_texts()
+        uindex = build_index(embed(texts, encoder))
+        results = search(question, encoder, uindex, texts, k=min(5, len(texts)))
+        scope, reference_corpus, corpus_note = "user", False, None
+    else:
+        # Session vide : on cherche dans le CORPUS DE REFERENCE, clairement signale.
+        results = search(question, encoder, ref_index, ref_summaries, k=5)
+        scope, reference_corpus = "reference", True
+        corpus_note = ("Corpus de référence CORD — ce ne sont pas vos dépenses. "
+                       "Analysez un reçu pour interroger les vôtres.")
+
     sources = [{"text": t, "score": float(s)} for t, s in results]
 
     answer, llm_used = None, False
@@ -490,15 +467,61 @@ def api_search(payload: SearchPayload):
             init_llm(backend="groq", api_key=groq_key)
             answer = answer_question(question, [s["text"] for s in sources])
             llm_used = True
-        except Exception:
+        except Exception as exc:
+            logger.warning("Réponse LLM échouée : %s", type(exc).__name__)
             answer, llm_used = None, False   # degradation : sources seules
 
-    return ok({"search_available": True, "llm_used": llm_used,
-               "answer": answer, "sources": sources})
+    return ok({"search_available": True, "llm_used": llm_used, "answer": answer,
+               "sources": sources, "scope": scope, "reference_corpus": reference_corpus,
+               "note": corpus_note, "demo_mode": session.demo_mode})
 
 
 # ---------------------------------------------------------------------------
-# GET /api/technical
+# Session utilisateur : etat, purge, mode demonstration
+# ---------------------------------------------------------------------------
+@app.get("/api/session")
+@safe
+def api_session(request: Request):
+    """Etat de la session courante : mode demo + nombre de reçus. Le front
+    s'en sert pour afficher (ou non) le bandeau de démonstration."""
+    session = _session(request)
+    return ok({"demo_mode": session.demo_mode,
+               "n_receipts": len(session.receipts),
+               "empty": session.is_empty()})
+
+
+@app.delete("/api/session")
+@safe
+def api_session_clear(request: Request):
+    """Vide les données de la session (reçus + mode démo)."""
+    session = _session(request)
+    session.clear()
+    return ok({"demo_mode": False, "n_receipts": 0, "empty": True})
+
+
+class DemoPayload(BaseModel):
+    enabled: bool = True
+
+
+@app.post("/api/settings/demo")
+@safe
+def api_settings_demo(payload: DemoPayload, request: Request):
+    """MODE DÉMONSTRATION : peuple la session avec le corpus CORD (pour montrer
+    un tableau de bord rempli en soutenance) ou le vide. Toujours signalé,
+    jamais silencieux -- la réponse porte demo_mode que le front affiche en
+    bandeau permanent."""
+    session = _session(request)
+    if payload.enabled:
+        receipts, items = reference_dataset()
+        session.load_demo(receipts, items)
+    else:
+        session.clear()
+    return ok({"demo_mode": session.demo_mode, "n_receipts": len(session.receipts),
+               "empty": session.is_empty()})
+
+
+# ---------------------------------------------------------------------------
+# GET /api/technical  (INCHANGE : donnees d'EVALUATION, pas de donnees user)
 # ---------------------------------------------------------------------------
 def _csv_records(name):
     try:
@@ -654,6 +677,34 @@ def api_settings_test(request: Request, payload: ApiKeyPayload = ApiKeyPayload()
                                  "Verifier la connexion reseau"])
     return ok({"provider": provider, "source": source, "ok": True,
                "message": "Connexion Groq reussie."})
+
+
+@app.get("/api/settings/models")
+@safe
+def api_settings_models(request: Request):
+    """Modeles disponibles (vision / texte) pour la cle configuree, afin que
+    l'utilisateur constate ce qui est utilisable. Corrige le 404 vision : le
+    modele n'est plus code en dur, il est choisi parmi les modeles reels."""
+    if not _is_local(request):
+        return _deny_remote()
+    key, source = resolve_key("groq")
+    if not key:
+        return fail("Aucune cle configuree.",
+                    detail="Configurez une cle Groq pour lister les modeles.",
+                    status=422, engine="settings",
+                    suggestions=["Saisir une cle Groq"])
+    try:
+        groups = classify_models("groq")
+        vision_selected = select_vision_model("groq")
+    except Exception as exc:
+        logger.warning("Liste des modeles Groq echouee : %s", type(exc).__name__)
+        return fail("Impossible de lister les modeles.",
+                    detail="La cle a ete refusee ou le service est injoignable.",
+                    status=422, engine="settings",
+                    suggestions=["Verifier la cle sur console.groq.com"])
+    return ok({"source": source, "vision": groups["vision"], "text": groups["text"],
+               "vision_selected": vision_selected,
+               "vision_available": vision_selected is not None})
 
 
 # ---------------------------------------------------------------------------

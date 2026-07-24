@@ -17,6 +17,7 @@ from src.accounting import (
     vat_summary, expense_report, DISCLAIMER,
     CHART_OF_ACCOUNTS, DEFAULT_CATEGORY_ACCOUNTS,
 )
+from src.session_store import UserSession
 
 st.set_page_config(page_title="Copilote de reçus", page_icon="🧾", layout="wide")
 
@@ -34,7 +35,10 @@ def init_state():
         "category_mapping": dict(DEFAULT_CATEGORY_ACCOUNTS),
         "current_result": None,      # dict : donnees du recu en cours d'analyse
         "analyze_error": None,
-        "manual_entries": [],        # recus valides manuellement pendant la session
+        # Session utilisateur : cloisonne les depenses de CETTE session du corpus
+        # CORD de reference (memoire seule). Auth future : keyer sur user_id.
+        "user_session": UserSession(session_id="streamlit", user_id=None),
+        "manual_entries": [],        # (deprecie) conserve pour compat, non utilise
         "qa_history": [],
         "groq_api_key": os.environ.get("GROQ_API_KEY", ""),
         "selected_receipt_id": None,
@@ -197,9 +201,26 @@ def _nan_to_none(value):
 # ---------------------------------------------------------------------------
 # Reglages (barre laterale, accessible depuis tous les onglets)
 # ---------------------------------------------------------------------------
-def render_settings_sidebar(receipts):
+def render_settings_sidebar(session, reference):
     with st.sidebar:
         st.header("⚙️ Réglages")
+
+        with st.expander("Données de démonstration", expanded=session.is_empty()):
+            st.caption("Peuple le tableau de bord et la comptabilité avec le corpus CORD "
+                       "(≈800 reçus) pour une démonstration, sans déposer de reçus. "
+                       "Ce ne sont **pas** vos dépenses réelles ; un bandeau le signale.")
+            demo_on = st.toggle("Charger les données de démonstration", value=session.demo_mode)
+            if demo_on and not session.demo_mode:
+                ref_receipts, ref_items = reference
+                session.load_demo(ref_receipts, ref_items)
+                st.rerun()
+            elif not demo_on and session.demo_mode:
+                session.clear()
+                st.rerun()
+            if not session.demo_mode and not session.is_empty():
+                if st.button("Vider mes données de session"):
+                    session.clear()
+                    st.rerun()
 
         with st.expander("Pays et taux de TVA", expanded=False):
             for code, rate in TAX_RATES.items():
@@ -287,8 +308,8 @@ def render_settings_sidebar(receipts):
 
         with st.expander("Export / purge"):
             st.download_button(
-                "Exporter tous les reçus (CSV)",
-                data=receipts.to_csv(index=False).encode("utf-8"),
+                "Exporter mes reçus (CSV)",
+                data=session.receipts_df().to_csv(index=False).encode("utf-8"),
                 file_name="receipts_export.csv", mime="text/csv",
             )
             if st.button("Purger le cache local"):
@@ -524,13 +545,14 @@ def render_analyze_result(receipts):
         st.json(result["raw_json"])
 
     if st.button("✅ Valider et enregistrer dans les dépenses", type="primary", disabled=entry is None):
-        st.session_state.manual_entries.append({
-            "items": result["items"], "subtotal": result["subtotal"], "tax": result["tax"],
-            "total": result["total"], "category": result["category"], "entry": entry,
-        })
+        flags_full = dict(flags)
+        flags_full["anomaly"] = any(v is False for v in flags.values())
+        # Ajout aux depenses de CETTE session (memoire seule, jamais sur disque).
+        st.session_state.user_session.add_receipt(
+            receipt, result["category"], flags_full, merchant=result["merchant"])
         st.session_state.current_result = None
         st.session_state.upload_key_version += 1   # repartir d'un uploader vide
-        st.toast("✅ Écriture enregistrée dans les dépenses")
+        st.toast("✅ Reçu enregistré dans vos dépenses")
         st.rerun()
 
 
@@ -638,7 +660,13 @@ def render_anomaly_detail(receipts, receipt_id):
 
 def render_dashboard_tab(items, receipts):
     if receipts.empty:
-        st.info("Aucun reçu analysé pour l'instant. Rendez-vous dans l'onglet **Analyser** pour commencer.")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Reçus analysés", 0)
+        c2.metric("Articles", 0)
+        c3.metric("Dépense totale", money(0))
+        c4.metric("Anomalies", 0)
+        st.info("📭 Aucun reçu analysé pour l'instant. Rendez-vous dans l'onglet **Analyser**, "
+                "ou activez **« Charger les données de démonstration »** dans ⚙️ Réglages.")
         return
 
     n_anomalies = int(receipts["anomaly"].sum()) if "anomaly" in receipts.columns else 0
@@ -698,7 +726,8 @@ def render_dashboard_tab(items, receipts):
 # ---------------------------------------------------------------------------
 def render_accounting_tab(receipts):
     if receipts.empty:
-        st.info("Aucun reçu à comptabiliser pour l'instant.")
+        st.info("🧮 Aucune écriture — analysez un reçu pour commencer, "
+                "ou activez le mode démonstration dans ⚙️ Réglages.")
         return
 
     period = st.selectbox("Période", ["Mois en cours", "Trimestre en cours", "Personnalisée"])
@@ -787,8 +816,12 @@ def _fill_question(text):
     st.session_state.trigger_search = True
 
 
-def render_ask_tab(summaries):
+def render_ask_tab(summaries, is_reference=False):
     st.markdown("### Interroger l'historique de dépenses")
+    if is_reference:
+        st.warning("🔬 Vous n'avez pas encore de dépenses : la recherche porte sur le "
+                   "**corpus de référence CORD** (ce ne sont pas vos dépenses). "
+                   "Analysez un reçu pour interroger les vôtres.")
     question = st.text_input("Votre question", key="question_input", placeholder="Ex. : combien ai-je dépensé en transport ce mois-ci ?")
 
     chip_cols = st.columns(len(SUGGESTED_QUESTIONS))
@@ -900,11 +933,31 @@ def render_technical_tab():
 # Point d'entree
 # ---------------------------------------------------------------------------
 def main():
-    items, receipts, summaries = load_data()
-    render_settings_sidebar(receipts)
+    # Corpus de REFERENCE CORD (data/*.csv) : sert au mode demo, au repli de
+    # recherche et a l'onglet Technique -- JAMAIS presente comme les depenses
+    # de l'utilisateur.
+    ref_items, ref_receipts, ref_summaries = load_data()
+    reference = (ref_receipts.to_dict("records"), ref_items.to_dict("records"))
+
+    session = st.session_state.user_session
+    render_settings_sidebar(session, reference)
 
     st.title("🧾 Copilote de reçus et dépenses")
     st.caption("Extraction automatique · vérification comptable · recherche sémantique")
+
+    # Bandeau permanent du mode demonstration -- toujours visible, jamais silencieux.
+    if session.demo_mode:
+        st.warning("🔬 **Mode démonstration** — données du corpus CORD, pas vos dépenses réelles.")
+
+    # Donnees de CETTE session (vides au depart), PAS le corpus CORD.
+    receipts = session.receipts_df()
+    items = session.items_df()
+    if session.demo_mode:
+        ask_summaries, ask_is_reference = ref_summaries, False
+    elif session.is_empty():
+        ask_summaries, ask_is_reference = ref_summaries, True   # repli corpus, clairement signale
+    else:
+        ask_summaries, ask_is_reference = session.search_texts(), False
 
     tab_analyze, tab_dashboard, tab_accounting, tab_ask, tab_technical = st.tabs(
         ["Analyser", "Tableau de bord", "Comptabilité", "Questions", "Technique"]
@@ -916,7 +969,7 @@ def main():
     with tab_accounting:
         render_accounting_tab(receipts)
     with tab_ask:
-        render_ask_tab(summaries)
+        render_ask_tab(ask_summaries, ask_is_reference)
     with tab_technical:
         render_technical_tab()
 

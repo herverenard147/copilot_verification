@@ -82,4 +82,25 @@ const API = {
       body: JSON.stringify({ provider }),
     }));
   },
+
+  async models() {
+    return this._json(await fetch('/api/settings/models'));
+  },
+
+  // --- Session utilisateur (cloisonnement des données) ---
+  async session() {
+    return this._json(await fetch('/api/session'));
+  },
+
+  async clearSession() {
+    return this._json(await fetch('/api/session', { method: 'DELETE' }));
+  },
+
+  async setDemo(enabled) {
+    return this._json(await fetch('/api/settings/demo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    }));
+  },
 };

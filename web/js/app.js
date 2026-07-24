@@ -13,6 +13,8 @@ const state = {
   file: null,          // File courant (pour l'aperçu image)
   result: null,        // dernier /api/extract
   askHistory: [],
+  demoMode: false,     // corpus CORD chargé dans la session (bandeau permanent)
+  sessionEmpty: true,  // aucune dépense utilisateur pour l'instant
 };
 
 /* ---------- helpers ---------- */
@@ -43,6 +45,8 @@ function chip(label, value) {
 function engineBadge(engine) {
   if (engine === 'llm_fallback')
     return `<span class="badge badge--fallback">🛰️ Moteur : LLM vision (fallback)</span>`;
+  if (engine === 'fallback_indisponible')
+    return `<span class="badge badge--fallback">⚠️ Fallback vision indisponible — modèle non accessible avec cette clé</span>`;
   return `<span class="badge badge--donut">🍩 Moteur : Donut</span>`;
 }
 
@@ -64,7 +68,31 @@ async function init() {
   populateSelects();
   wireNav();
   wireSettings();
+  $('#demo-exit').onclick = exitDemo;
+  await refreshSession();
   renderAnalyzeEmpty();
+}
+
+// Met à jour l'état de session (mode démo + vacuité) et le bandeau permanent.
+async function refreshSession() {
+  try {
+    const s = await API.session();
+    state.demoMode = !!s.demo_mode;
+    state.sessionEmpty = !!s.empty;
+  } catch (e) {
+    state.demoMode = false;
+    state.sessionEmpty = true;
+  }
+  $('#demo-banner').classList.toggle('hidden', !state.demoMode);
+}
+
+async function exitDemo() {
+  try { await API.setDemo(false); } catch (e) { /* ignore */ }
+  await refreshSession();
+  toast('Mode démonstration désactivé');
+  // rafraîchit l'onglet visible
+  const active = $('#nav button.active');
+  if (active) switchTab(active.dataset.tab, active);
 }
 
 function populateSelects() {
@@ -362,8 +390,8 @@ async function saveReceipt() {
   try {
     const data = await API.validate(payload);
     if (data.persisted) {
-      toast('✅ Reçu #' + data.receipt_id + ' enregistré dans les dépenses');
-      loadedOnce.dashboardStale = true;
+      toast('✅ Reçu #' + data.receipt_id + ' enregistré dans vos dépenses');
+      await refreshSession();
       renderAnalyzeEmpty();
     } else {
       toast('Enregistré côté calcul mais non persisté.');
@@ -381,7 +409,9 @@ async function loadDashboard() {
   body.innerHTML = `<p class="muted">Chargement…</p>`;
   try {
     const d = await API.dashboard();
-    if (d.empty) { body.innerHTML = `<div class="card"><div class="section-body muted">Aucun reçu analysé pour l'instant. Rendez-vous dans l'onglet <b>Analyser</b>.</div></div>`; return; }
+    state.demoMode = !!d.demo_mode;
+    $('#demo-banner').classList.toggle('hidden', !state.demoMode);
+    if (d.empty) { body.innerHTML = emptyDashboard(); wireEmptyState(); return; }
     const k = d.kpis;
     const kpis = `<div class="kpi-grid">
       <div class="kpi"><div class="label-caps">Reçus analysés</div><div class="value">${money(k.n_receipts)}</div></div>
@@ -421,6 +451,32 @@ async function loadDashboard() {
   }
 }
 
+// État vide du tableau de bord : 4 KPI à zéro grisés + CTA + mention démo.
+function emptyDashboard() {
+  const zero = (lbl) => `<div class="kpi kpi--muted"><div class="label-caps">${lbl}</div><div class="value">0</div></div>`;
+  return `
+    <div class="kpi-grid">
+      ${zero('Reçus analysés')}${zero('Articles')}${zero('Dépense totale')}${zero('Anomalies')}
+    </div>
+    <div class="card"><div class="empty-state">
+      <div class="empty-icon">📭</div>
+      <p class="headline-sm">Aucun reçu analysé pour l'instant</p>
+      <p class="muted">Vos dépenses apparaîtront ici une fois un reçu analysé et validé.</p>
+      <div class="btn-row" style="justify-content:center;margin-top:var(--md)">
+        <button class="btn btn--primary" id="empty-analyze">📷 Analyser un reçu</button>
+      </div>
+      <p class="muted body-sm" style="margin-top:var(--md)">
+        💡 Pour une démonstration sans déposer 50 reçus : activez
+        <b>« Charger les données de démonstration »</b> dans ⚙️ Réglages.
+      </p>
+    </div></div>`;
+}
+
+function wireEmptyState() {
+  const b = $('#empty-analyze');
+  if (b) b.onclick = () => { const t = $('#nav button[data-tab="analyze"]'); switchTab('analyze', t); };
+}
+
 /* ==========================================================================
    ONGLET 3 — COMPTABILITÉ
    ========================================================================== */
@@ -433,7 +489,22 @@ async function renderAccounting() {
   body.innerHTML = `<p class="muted">Chargement…</p>`;
   try {
     const d = await API.accounting($('#sel-period').value, state.payment, state.country);
-    if (d.empty) { body.innerHTML = `<div class="card"><div class="section-body muted">Aucun reçu à comptabiliser.</div></div>`; return; }
+    state.demoMode = !!d.demo_mode;
+    $('#demo-banner').classList.toggle('hidden', !state.demoMode);
+    if (d.empty) {
+      body.innerHTML = `
+        <div class="card"><div class="empty-state">
+          <div class="empty-icon">🧮</div>
+          <p class="headline-sm">Aucune écriture — analysez un reçu pour commencer</p>
+          <p class="muted">Le journal comptable et la TVA se construisent à partir de vos reçus validés.</p>
+          <div class="btn-row" style="justify-content:center;margin-top:var(--md)">
+            <button class="btn btn--primary" id="empty-analyze">📷 Analyser un reçu</button>
+          </div>
+          <p class="muted body-sm" style="margin-top:var(--md)">💡 Ou activez le mode démonstration dans ⚙️ Réglages.</p>
+        </div></div>`;
+      wireEmptyState();
+      return;
+    }
     const v = d.vat, rep = d.report;
     const reasons = Object.entries(v.non_recoverable_reasons || {}).map(([r, det]) =>
       `<div class="muted body-sm">• ${esc(r)} : ${det.count} reçu(s), ${money(det.amount)}</div>`).join('');
@@ -489,6 +560,11 @@ function setupAsk() {
   $$('#ask-suggestions .pill').forEach(p => p.onclick = () => { $('#ask-input').value = p.textContent; doAsk(); });
   $('#ask-search').onclick = doAsk;
   $('#ask-input').onkeydown = e => { if (e.key === 'Enter') doAsk(); };
+  // Session vide (hors démo) : prévenir que la recherche portera sur le corpus.
+  if (state.sessionEmpty && !state.demoMode) {
+    $('#ask-body').innerHTML = `<div class="banner">🔬 Vous n'avez pas encore de dépenses : la recherche portera sur le
+      <b>corpus de référence CORD</b> (ce ne sont pas vos dépenses). Analysez un reçu pour interroger les vôtres.</div>`;
+  }
 }
 
 async function doAsk() {
@@ -499,7 +575,10 @@ async function doAsk() {
   try {
     const d = await API.search(q);
     if (!d.search_available) { body.innerHTML = `<div class="banner">${esc(d.note)}</div>`; return; }
-    const answer = `<div class="card"><div class="section-head"><span class="label-caps">Réponse</span></div>
+    // Session vide : la recherche porte sur le corpus de référence, clairement signalé.
+    const scopeNote = (d.reference_corpus && d.note)
+      ? `<div class="banner">🔬 ${esc(d.note)}</div>` : '';
+    const answer = scopeNote + `<div class="card"><div class="section-head"><span class="label-caps">Réponse</span></div>
       <div class="section-body">${d.answer ? esc(d.answer)
         : `D'après les reçus les plus pertinents pour : <i>${esc(q)}</i>.` +
           (state.config.groq_configured ? '' : ` <span class="muted body-sm">(réponse LLM désactivée : aucune clé Groq)</span>`)}</div></div>`;
@@ -615,16 +694,53 @@ function renderSettings() {
           <button class="btn" id="btn-key-clear">Effacer</button>
         </div>
         <div id="key-test-result" class="body-sm"></div>
+        <div class="btn-row"><button class="btn" id="btn-key-models">Voir les modèles disponibles</button></div>
+        <div id="models-result" class="body-sm"></div>
         <p class="muted body-sm">🔒 Obtenez une clé gratuite sur <b>console.groq.com</b>.
           Elle sert au fallback vision, à l'extraction marchand/date et aux réponses du RAG.
           La clé reste <b>en mémoire</b> (jamais écrite sur disque, jamais renvoyée par le serveur).</p>
+      </div></div>
+
+    <div class="card"><div class="section-head"><span class="label-caps">Données de démonstration</span></div>
+      <div class="section-body stack">
+        <p class="body-sm">Peuple le tableau de bord et la comptabilité avec le <b>corpus CORD</b>
+          (≈800 reçus indonésiens) pour une démonstration, sans déposer de reçus. Un bandeau permanent
+          le signale. Ce ne sont <b>pas</b> vos dépenses réelles.</p>
+        <div class="btn-row">
+          <button class="btn btn--primary" id="btn-demo-on">Charger les données de démonstration</button>
+          <button class="btn" id="btn-demo-off">Vider mes données de session</button>
+        </div>
+        <div id="demo-result" class="body-sm muted"></div>
       </div></div>
 
     <div class="card"><div class="section-head"><span class="label-caps">Plan de comptes (SYSCOHADA)</span></div>
       <table><thead><tr><th>Compte</th><th>Libellé</th></tr></thead><tbody>${accounts}</tbody></table></div>
     <p class="muted body-sm">ℹ️ ${esc(c.disclaimer)}</p>`;
   wireApiKeys();
+  wireDemo();
   refreshKeyStatus();
+}
+
+function wireDemo() {
+  const result = $('#demo-result');
+  const setState = (d) => {
+    state.demoMode = !!d.demo_mode;
+    state.sessionEmpty = !!d.empty;
+    $('#demo-banner').classList.toggle('hidden', !state.demoMode);
+    result.textContent = state.demoMode
+      ? `🔬 Mode démonstration actif — ${d.n_receipts} reçus du corpus CORD.`
+      : (d.n_receipts ? `${d.n_receipts} reçu(s) dans votre session.` : 'Session vide.');
+  };
+  API.session().then(setState).catch(() => {});
+  $('#btn-demo-on').onclick = async () => {
+    result.textContent = 'Chargement du corpus…';
+    try { setState(await API.setDemo(true)); toast('🔬 Données de démonstration chargées'); }
+    catch (e) { result.textContent = 'Échec : ' + e.message; }
+  };
+  $('#btn-demo-off').onclick = async () => {
+    try { setState(await API.clearSession()); toast('Session vidée'); }
+    catch (e) { result.textContent = 'Échec : ' + e.message; }
+  };
 }
 
 // Clé mémorisée dans sessionStorage (effacée à la fermeture de l'onglet),
@@ -709,6 +825,27 @@ function wireApiKeys() {
       res.className = 'body-sm';
       res.textContent = '❌ ' + e.message + (e.detail ? ' — ' + e.detail : '');
       refreshKeyStatus();
+    }
+  };
+
+  // Liste des modèles réellement disponibles pour la clé (corrige le 404 vision :
+  // le modèle vision est choisi parmi ceux-ci, plus jamais codé en dur).
+  $('#btn-key-models').onclick = async () => {
+    const res = $('#models-result');
+    res.className = 'body-sm muted';
+    res.textContent = 'Interrogation des modèles…';
+    try {
+      const d = await API.models();
+      const visionLine = d.vision_available
+        ? `✅ Vision utilisable : <b>${esc(d.vision_selected)}</b>`
+        : `⚠️ Aucun modèle vision accessible avec cette clé — le fallback vision est indisponible.`;
+      res.className = 'body-sm';
+      res.innerHTML = `${visionLine}
+        <div class="muted" style="margin-top:var(--xs)">Vision (${d.vision.length}) : ${d.vision.map(esc).join(', ') || '—'}</div>
+        <div class="muted">Texte (${d.text.length}) : ${d.text.slice(0, 8).map(esc).join(', ')}${d.text.length > 8 ? '…' : ''}</div>`;
+    } catch (e) {
+      res.className = 'body-sm';
+      res.textContent = '❌ ' + e.message + (e.detail ? ' — ' + e.detail : '');
     }
   };
 }
