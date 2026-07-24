@@ -56,4 +56,30 @@ const API = {
   async technical() {
     return this._json(await fetch('/api/technical'));
   },
+
+  // --- Réglages : clés API (la valeur n'est jamais renvoyée par le serveur) ---
+  async keyStatus() {
+    return this._json(await fetch('/api/settings/status'));
+  },
+
+  async setKey(provider, key) {
+    return this._json(await fetch('/api/settings/apikey', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider, key }),
+    }));
+  },
+
+  async clearKey(provider) {
+    return this._json(await fetch('/api/settings/apikey?provider=' + encodeURIComponent(provider),
+      { method: 'DELETE' }));
+  },
+
+  async testKey(provider) {
+    return this._json(await fetch('/api/settings/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider }),
+    }));
+  },
 };

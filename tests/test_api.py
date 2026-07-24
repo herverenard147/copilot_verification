@@ -5,15 +5,31 @@ Le chemin Donut est monkeypatche (pas de telechargement du modele en test) ;
 les cas d'erreur (image invalide, fichier vide, PDF renomme) s'arretent AVANT
 Donut de toute facon."""
 import io
+import pathlib
 
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
 import api
+import src.llm as llm
 
 # raise_server_exceptions=False : si une erreur passait entre les mailles, le
 # test verrait la reponse (jamais une exception) -- c'est justement ce qu'on garantit.
 client = TestClient(api.app, raise_server_exceptions=False)
+
+VALID_KEY = "gsk_test_key_1234567890"     # forme plausible, jamais envoyee a Groq
+
+
+@pytest.fixture
+def clean_keys(monkeypatch):
+    """Isole les tests de cles : aucune variable d'env, memoire de session vide
+    avant ET apres (le stockage est un global de module qui persiste sinon)."""
+    for var in ("GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    llm._session_keys.clear()
+    yield
+    llm._session_keys.clear()
 
 
 def png_bytes():
@@ -76,3 +92,66 @@ def test_endpoints_lecture_ne_plantent_pas():
         r = client.get(path)
         assert r.status_code == 200, path
         assert r.json()["success"] is True
+
+
+# ---------------------------------------------------------------------------
+# Reglages : cles API (memoire seule, jamais renvoyees ni ecrites sur disque)
+# ---------------------------------------------------------------------------
+def test_apikey_post_puis_status_session(clean_keys):
+    r = client.post("/api/settings/apikey", json={"provider": "groq", "key": VALID_KEY})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["success"] is True and body["source"] == "session"
+    assert VALID_KEY not in r.text            # la valeur n'est JAMAIS renvoyee
+
+    st = client.get("/api/settings/status")
+    assert st.status_code == 200
+    assert st.json()["groq"] == {"source": "session", "configured": True}
+    assert VALID_KEY not in st.text           # ni dans le status
+
+
+def test_apikey_delete_puis_status_none(clean_keys):
+    client.post("/api/settings/apikey", json={"provider": "groq", "key": VALID_KEY})
+    r = client.delete("/api/settings/apikey?provider=groq")
+    assert r.status_code == 200
+    assert client.get("/api/settings/status").json()["groq"] == {"source": "none", "configured": False}
+
+
+def test_env_prioritaire_et_post_ne_lecrase_pas(clean_keys, monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_env_key_abcdefgh")
+    assert client.get("/api/settings/status").json()["groq"]["source"] == "env"
+
+    r = client.post("/api/settings/apikey", json={"provider": "groq", "key": "gsk_session_override_x"})
+    assert r.status_code == 200
+    assert r.json()["source"] == "env"        # non ecrasee
+
+    # une fois l'env retiree, rien n'a ete stocke en session
+    monkeypatch.delenv("GROQ_API_KEY")
+    assert client.get("/api/settings/status").json()["groq"]["source"] == "none"
+
+
+def test_apikey_vide_ou_malformee_erreur_propre(clean_keys):
+    for bad in ("", "   ", "short", "cle avec des espaces"):
+        r = client.post("/api/settings/apikey", json={"provider": "groq", "key": bad})
+        assert r.status_code != 500
+        assert r.json()["success"] is False
+    assert client.get("/api/settings/status").json()["groq"]["source"] == "none"
+
+
+def test_test_endpoint_sans_cle_ne_plante_pas(clean_keys):
+    r = client.post("/api/settings/test", json={"provider": "groq"})
+    assert r.status_code != 500
+    assert r.json()["success"] is False       # aucune cle -> echec propre, pas d'appel reseau
+
+
+def test_apikey_ne_cree_aucun_fichier(clean_keys):
+    root, data = pathlib.Path("."), pathlib.Path("data")
+    before_root = {p.name for p in root.iterdir()}
+    before_data = {p.name for p in data.iterdir()}
+
+    client.post("/api/settings/apikey", json={"provider": "groq", "key": VALID_KEY})
+    client.get("/api/settings/status")
+    client.delete("/api/settings/apikey?provider=groq")
+
+    assert {p.name for p in root.iterdir()} == before_root
+    assert {p.name for p in data.iterdir()} == before_data

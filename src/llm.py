@@ -28,6 +28,65 @@ DEFAULT_VISION_MODEL = os.environ.get(
     "GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"
 )
 
+# ---------------------------------------------------------------------------
+# Resolution des cles API : SOURCE UNIQUE de verite (env > session > absent).
+#
+# Les cles de session vivent UNIQUEMENT en memoire du processus (ce dict), le
+# temps de la vie de l'app : jamais ecrites sur disque, jamais dans un .env,
+# jamais journalisees. La variable d'environnement l'emporte toujours ; quand
+# elle est presente, la cle de session est ignoree (et l'UI passe en lecture
+# seule). Toute autre partie du code (api.py, app.py) doit passer par
+# resolve_key()/key_source() plutot que de relire os.environ, pour ne pas
+# dupliquer la priorite.
+# ---------------------------------------------------------------------------
+_ENV_VARS = {
+    "groq": ["GROQ_API_KEY"],
+    "gemini": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],   # prevu, non expose dans l'UI
+}
+
+_session_keys = {}   # {provider: cle} — memoire volatile, duree du processus
+
+
+def _env_key(provider):
+    for name in _ENV_VARS.get(provider, []):
+        value = os.environ.get(name)
+        if value:
+            return value
+    return None
+
+
+def resolve_key(provider="groq"):
+    """Retourne (cle, source) selon la priorite env > session > absent.
+    source vaut "env", "session" ou "none". Ne journalise jamais la cle."""
+    env = _env_key(provider)
+    if env:
+        return env, "env"
+    session = _session_keys.get(provider)
+    if session:
+        return session, "session"
+    return None, "none"
+
+
+def key_source(provider="groq"):
+    """Etat SEUL (jamais la valeur) : "env" | "session" | "none"."""
+    return resolve_key(provider)[1]
+
+
+def set_session_key(provider, key):
+    """Stocke une cle EN MEMOIRE pour la duree du processus. Aucune ecriture
+    disque. Leve ValueError si la cle est vide (l'appelant renvoie une erreur
+    propre). N'ecrase pas une cle d'environnement : la priorite est geree en
+    amont par l'appelant via key_source()."""
+    key = (key or "").strip()
+    if not key:
+        raise ValueError("Cle vide")
+    _session_keys[provider] = key
+
+
+def clear_session_key(provider):
+    """Efface la cle de session (aucun effet sur une eventuelle cle d'env)."""
+    _session_keys.pop(provider, None)
+
 
 def init_llm(backend="groq", api_key=None, model_name=None):
     """backend="groq"   : API gratuite, quota genereux (console.groq.com)
@@ -165,7 +224,7 @@ def extract_receipt_via_vision(image, api_key=None, model=None):
     (l'API) de decider quoi faire -- ici, retomber sur le resultat Donut et le
     signaler. On ne masque jamais l'echec.
     """
-    api_key = api_key or os.environ.get("GROQ_API_KEY")
+    api_key = api_key or resolve_key("groq")[0]
     if not api_key:
         raise RuntimeError("Aucune cle Groq : fallback vision indisponible")
 

@@ -234,13 +234,56 @@ def render_settings_sidebar(receipts):
             s["total_tolerance"] = st.slider("Écart sous-total+taxe / total toléré", 0.0, 0.10, s["total_tolerance"])
             s["tax_band"] = st.slider("Bande de plausibilité du taux de taxe", 0.0, 0.10, s["tax_band"])
 
-        with st.expander("Assistant IA (optionnel)"):
+        with st.expander("Clés API"):
+            from src.llm import (
+                key_source, set_session_key, clear_session_key, resolve_key,
+            )
             st.caption("Sans clé, l'onglet Questions reste utilisable : recherche FAISS "
                        "seule, sans réponse générée par un LLM (dégradation gracieuse).")
-            st.session_state.groq_api_key = st.text_input(
-                "Clé API Groq", value=st.session_state.groq_api_key, type="password",
-                help="Gratuite sur console.groq.com — laissez vide pour désactiver la génération de réponse.",
-            )
+
+            source = key_source("groq")
+            status_label = {
+                "env": "✅ Configurée (env)",
+                "session": "✅ Configurée (session)",
+                "none": "➖ Non configurée — recherche sémantique seule",
+            }[source]
+            st.markdown(f"**Groq** — {status_label}")
+
+            if source == "env":
+                st.caption("Clé fournie par la variable d'environnement GROQ_API_KEY "
+                           "(prioritaire) — non modifiable ici.")
+            else:
+                typed = st.text_input(
+                    "Clé API Groq", value="", type="password", key="groq_key_input",
+                    placeholder="gsk_…",
+                    help="Gratuite sur console.groq.com. Reste en mémoire, jamais écrite sur disque.",
+                )
+                col_save, col_test, col_clear = st.columns(3)
+                if col_save.button("Enregistrer", key="groq_save"):
+                    try:
+                        set_session_key("groq", typed)
+                        st.toast("✅ Clé Groq enregistrée (session)")
+                        st.rerun()
+                    except ValueError:
+                        st.warning("Clé vide : rien enregistré.")
+                if col_test.button("Tester", key="groq_test"):
+                    key = resolve_key("groq")[0]
+                    if not key:
+                        st.warning("Aucune clé à tester.")
+                    else:
+                        try:
+                            from groq import Groq
+                            Groq(api_key=key).models.list()   # requête légère
+                            st.success("✅ Connexion Groq réussie.")
+                        except Exception as exc:
+                            # ni la clé, ni le message SDK — seulement le type
+                            st.error("❌ Connexion Groq échouée : clé refusée ou service injoignable.")
+                            st.caption(f"({type(exc).__name__})")
+                if col_clear.button("Effacer", key="groq_clear"):
+                    clear_session_key("groq")
+                    st.toast("Clé effacée")
+                    st.rerun()
+            st.caption("🔒 La clé n'est jamais écrite sur disque ni journalisée.")
 
         with st.expander("Export / purge"):
             st.download_button(
@@ -762,10 +805,12 @@ def render_ask_tab(summaries):
             from src.semantic import search
             results = search(question, encoder, index, summaries, k=5)
 
+            from src.llm import resolve_key
+            groq_key = resolve_key("groq")[0]
             llm_answer = None
-            if results and st.session_state.groq_api_key:
+            if results and groq_key:
                 try:
-                    _init_groq(st.session_state.groq_api_key)
+                    _init_groq(groq_key)
                     from src.llm import answer_question
                     llm_answer = answer_question(question, [texte for texte, _ in results])
                 except Exception:
@@ -777,7 +822,7 @@ def render_ask_tab(summaries):
                     st.write(llm_answer)
                 elif results:
                     st.write(f"D'après les reçus les plus pertinents, voici ce que je trouve pour : *{question}*")
-                    if st.session_state.groq_api_key:
+                    if groq_key:
                         st.caption("⚠️ Génération LLM indisponible pour l'instant — réponse basée sur les sources seules.")
                 else:
                     st.write("Aucun reçu pertinent trouvé.")

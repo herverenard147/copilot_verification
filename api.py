@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
@@ -32,7 +32,10 @@ from src.accounting import (
 )
 from src.preprocess import preprocess_image
 from src.extractor import extract
-from src.llm import extract_receipt_via_vision
+from src.llm import (
+    extract_receipt_via_vision,
+    resolve_key, key_source, set_session_key, clear_session_key,
+)
 
 DATA = Path("data")
 WEB = Path("web")
@@ -267,7 +270,8 @@ def api_extract(file: UploadFile = File(...), country: str = Form("CI"),
     # 2) Fallback vision ASSUME : pays CI (hors domaine) OU sortie Donut vide
     donut_incoherent = (not receipt.items) and (not receipt.total)
     want_fallback = (country == "CI") or donut_incoherent
-    if want_fallback and os.environ.get("GROQ_API_KEY"):
+    groq_key = resolve_key("groq")[0]
+    if want_fallback and groq_key:
         try:
             vision_pred = extract_receipt_via_vision(pre_img)
             vision_receipt = Receipt.from_gt_parse(vision_pred)
@@ -479,10 +483,11 @@ def api_search(payload: SearchPayload):
     sources = [{"text": t, "score": float(s)} for t, s in results]
 
     answer, llm_used = None, False
-    if sources and os.environ.get("GROQ_API_KEY"):
+    groq_key = resolve_key("groq")[0]
+    if sources and groq_key:
         try:
             from src.llm import init_llm, answer_question
-            init_llm(backend="groq", api_key=os.environ["GROQ_API_KEY"])
+            init_llm(backend="groq", api_key=groq_key)
             answer = answer_question(question, [s["text"] for s in sources])
             llm_used = True
         except Exception:
@@ -518,13 +523,137 @@ def api_technical():
 @app.get("/api/config")
 @safe
 def api_config():
+    groq = key_source("groq")
     return ok({
         "countries": {c: TAX_RATES[c] for c in TAX_RATES},
         "payment_modes": list(PAYMENT_ACCOUNTS.keys()),
         "chart_of_accounts": CHART_OF_ACCOUNTS,
-        "groq_configured": bool(os.environ.get("GROQ_API_KEY")),
+        "groq_configured": groq != "none",
+        "groq_source": groq,
         "disclaimer": DISCLAIMER,
     })
+
+
+# ---------------------------------------------------------------------------
+# Reglages : cles API (memoire seule, jamais sur disque ni dans les logs)
+# ---------------------------------------------------------------------------
+_LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
+_SUPPORTED_PROVIDERS = {"groq"}   # Gemini prevu dans src/llm mais non expose ici
+
+
+def _is_local(request):
+    """N'autorise que les requetes locales : l'app tourne sur la machine de
+    l'utilisateur, la config des cles ne doit pas etre pilotable a distance."""
+    client = request.client
+    host = client.host if client else None
+    if host not in _LOCAL_HOSTS:
+        return False
+    origin = request.headers.get("origin")
+    if origin:
+        from urllib.parse import urlparse
+        if urlparse(origin).hostname not in {"127.0.0.1", "::1", "localhost"}:
+            return False
+    return True
+
+
+def _deny_remote():
+    return fail("Configuration accessible en local uniquement.",
+                detail="Cette action n'est autorisee que depuis cette machine.",
+                status=403, engine="settings",
+                suggestions=["Ouvrir l'application en local (localhost)"])
+
+
+def _provider_of(name):
+    return (name or "groq").strip().lower()
+
+
+class ApiKeyPayload(BaseModel):
+    provider: str = "groq"
+    key: str = ""
+
+
+@app.post("/api/settings/apikey")
+@safe
+def api_set_apikey(payload: ApiKeyPayload, request: Request):
+    """Enregistre une cle EN MEMOIRE (session serveur). Ne renvoie JAMAIS la
+    valeur, seulement l'etat. La cle d'environnement reste prioritaire."""
+    if not _is_local(request):
+        return _deny_remote()
+    provider = _provider_of(payload.provider)
+    if provider not in _SUPPORTED_PROVIDERS:
+        return fail("Fournisseur non pris en charge.",
+                    detail="Seule la cle Groq est configurable ici.",
+                    status=422, engine="settings")
+    # Cle d'environnement prioritaire : on ne l'ecrase pas.
+    if key_source(provider) == "env":
+        return ok({"provider": provider, "source": "env", "configured": True,
+                   "note": "Cle fournie par l'environnement (prioritaire) — non modifiable ici."})
+    key = (payload.key or "").strip()
+    if not key or any(c.isspace() for c in key) or len(key) < 10:
+        return fail("Cle vide ou invalide.",
+                    detail="Collez une cle non vide, sans espace.",
+                    status=422, engine="settings",
+                    suggestions=["Copier la cle depuis console.groq.com"])
+    set_session_key(provider, key)     # memoire seule, aucune ecriture disque
+    return ok({"provider": provider, "source": "session", "configured": True})
+
+
+@app.delete("/api/settings/apikey")
+@safe
+def api_clear_apikey(request: Request, provider: str = "groq"):
+    """Efface la cle de session. Sans effet sur une cle d'environnement."""
+    if not _is_local(request):
+        return _deny_remote()
+    provider = _provider_of(provider)
+    clear_session_key(provider)
+    source = key_source(provider)
+    return ok({"provider": provider, "source": source, "configured": source != "none"})
+
+
+@app.get("/api/settings/status")
+@safe
+def api_settings_status(request: Request):
+    """Etat des cles, JAMAIS leur valeur : {source, configured} par fournisseur."""
+    if not _is_local(request):
+        return _deny_remote()
+    providers = {}
+    for provider in sorted(_SUPPORTED_PROVIDERS):
+        source = key_source(provider)
+        providers[provider] = {"source": source, "configured": source != "none"}
+    return ok({"providers": providers, "groq": providers["groq"]})
+
+
+@app.post("/api/settings/test")
+@safe
+def api_settings_test(request: Request, payload: ApiKeyPayload = ApiKeyPayload()):
+    """Appel minimal au LLM pour verifier la cle active (env ou session).
+    En cas d'echec, message humain ; on ne journalise NI la cle, NI le
+    traceback du SDK (dont les exceptions peuvent embarquer des en-tetes)."""
+    if not _is_local(request):
+        return _deny_remote()
+    provider = _provider_of(payload.provider)
+    if provider not in _SUPPORTED_PROVIDERS:
+        return fail("Fournisseur non pris en charge.", status=422, engine="settings")
+
+    key, source = resolve_key(provider)
+    if not key:
+        return fail("Aucune cle a tester.",
+                    detail="Configurez d'abord une cle Groq.",
+                    status=422, engine="settings",
+                    suggestions=["Saisir une cle Groq puis relancer le test"])
+    try:
+        from groq import Groq
+        Groq(api_key=key).models.list()          # requete legere de verification
+    except Exception as exc:
+        # On ne logue que le TYPE d'exception : ni la cle, ni le message SDK.
+        logger.warning("Test cle %s echoue : %s", provider, type(exc).__name__)
+        return fail("Connexion Groq echouee.",
+                    detail="La cle a ete refusee ou le service est injoignable.",
+                    status=422, engine="settings",
+                    suggestions=["Verifier la cle sur console.groq.com",
+                                 "Verifier la connexion reseau"])
+    return ok({"provider": provider, "source": source, "ok": True,
+               "message": "Connexion Groq reussie."})
 
 
 # ---------------------------------------------------------------------------

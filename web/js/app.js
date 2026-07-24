@@ -601,13 +601,116 @@ function renderSettings() {
   $('#panel-body').innerHTML = `
     <div class="card"><div class="section-head"><span class="label-caps">Pays et taux de TVA</span></div>
       <div class="section-body">${taxes}</div></div>
-    <div class="card"><div class="section-head"><span class="label-caps">Assistant IA</span></div>
-      <div class="section-body body-sm">${c.groq_configured
-        ? '✅ Clé Groq détectée : réponses LLM et fallback vision actifs.'
-        : '➖ Aucune clé Groq (variable GROQ_API_KEY). La recherche FAISS et les règles fonctionnent ; réponse LLM et fallback vision désactivés.'}</div></div>
+
+    <div class="card"><div class="section-head"><span class="label-caps">Clés API</span></div>
+      <div class="section-body stack">
+        <div>
+          <label class="field" for="in-groq-key">Clé Groq</label>
+          <input id="in-groq-key" type="password" autocomplete="off" placeholder="gsk_…" />
+          <div id="groq-status" class="body-sm muted" style="margin-top:var(--xs)">Vérification de l'état…</div>
+        </div>
+        <div class="btn-row">
+          <button class="btn" id="btn-key-test">Tester la connexion</button>
+          <button class="btn btn--primary" id="btn-key-save">Enregistrer</button>
+          <button class="btn" id="btn-key-clear">Effacer</button>
+        </div>
+        <div id="key-test-result" class="body-sm"></div>
+        <p class="muted body-sm">🔒 Obtenez une clé gratuite sur <b>console.groq.com</b>.
+          Elle sert au fallback vision, à l'extraction marchand/date et aux réponses du RAG.
+          La clé reste <b>en mémoire</b> (jamais écrite sur disque, jamais renvoyée par le serveur).</p>
+      </div></div>
+
     <div class="card"><div class="section-head"><span class="label-caps">Plan de comptes (SYSCOHADA)</span></div>
       <table><thead><tr><th>Compte</th><th>Libellé</th></tr></thead><tbody>${accounts}</tbody></table></div>
     <p class="muted body-sm">ℹ️ ${esc(c.disclaimer)}</p>`;
+  wireApiKeys();
+  refreshKeyStatus();
+}
+
+// Clé mémorisée dans sessionStorage (effacée à la fermeture de l'onglet),
+// JAMAIS localStorage. Sert uniquement à re-fournir la clé au serveur si son
+// process a redémarré pendant la session du navigateur.
+const GROQ_SS_KEY = 'copilote.groqKey';
+
+const KEY_STATUS_LABEL = {
+  env: '✅ Configurée (env)',
+  session: '✅ Configurée (session)',
+  none: '➖ Non configurée — recherche sémantique seule',
+};
+
+async function refreshKeyStatus() {
+  const el = $('#groq-status'), input = $('#in-groq-key');
+  if (!el) return;
+  try {
+    let s = await API.keyStatus();
+    let src = s.groq.source;
+    // Si le serveur ne connaît aucune clé mais que le navigateur en garde une
+    // (redémarrage serveur), on la re-transmet une fois puis on relit l'état.
+    if (src === 'none') {
+      const saved = sessionStorage.getItem(GROQ_SS_KEY);
+      if (saved) {
+        try { await API.setKey('groq', saved); s = await API.keyStatus(); src = s.groq.source; }
+        catch (e) { sessionStorage.removeItem(GROQ_SS_KEY); }
+      }
+    }
+    el.textContent = KEY_STATUS_LABEL[src] || src;
+    state.config.groq_configured = src !== 'none';
+    const envLocked = src === 'env';
+    input.disabled = envLocked;
+    input.placeholder = envLocked ? "Fournie par l'environnement (prioritaire)" : 'gsk_…';
+    $('#btn-key-save').disabled = envLocked;
+    $('#btn-key-clear').disabled = envLocked;
+  } catch (e) {
+    el.textContent = 'État indisponible.';
+  }
+}
+
+function wireApiKeys() {
+  $('#btn-key-save').onclick = async () => {
+    const key = $('#in-groq-key').value.trim();
+    try {
+      await API.setKey('groq', key);
+      sessionStorage.setItem(GROQ_SS_KEY, key);
+      $('#in-groq-key').value = '';
+      $('#key-test-result').textContent = '';
+      toast('✅ Clé Groq enregistrée (session)');
+      refreshKeyStatus();
+    } catch (e) {
+      toast('Clé refusée : ' + e.message);
+    }
+  };
+
+  $('#btn-key-clear').onclick = async () => {
+    try { await API.clearKey('groq'); } catch (e) { /* on efface côté nav quoi qu'il arrive */ }
+    sessionStorage.removeItem(GROQ_SS_KEY);
+    $('#in-groq-key').value = '';
+    $('#key-test-result').textContent = '';
+    toast('Clé effacée');
+    refreshKeyStatus();
+  };
+
+  $('#btn-key-test').onclick = async () => {
+    const res = $('#key-test-result');
+    const typed = $('#in-groq-key').value.trim();
+    res.className = 'body-sm muted';
+    res.textContent = 'Test en cours…';
+    try {
+      // Une clé saisie mais non encore enregistrée est d'abord posée en session.
+      if (typed) {
+        await API.setKey('groq', typed);
+        sessionStorage.setItem(GROQ_SS_KEY, typed);
+        $('#in-groq-key').value = '';
+      }
+      const d = await API.testKey('groq');
+      res.className = 'body-sm';
+      res.textContent = '✅ ' + (d.message || 'Connexion réussie.');
+      refreshKeyStatus();
+    } catch (e) {
+      res.className = 'body-sm';
+      res.textContent = '❌ ' + e.message + (e.detail ? ' — ' + e.detail : '');
+      refreshKeyStatus();
+    }
+  };
 }
 
 document.addEventListener('DOMContentLoaded', init);
