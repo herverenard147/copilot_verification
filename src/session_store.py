@@ -11,7 +11,15 @@ Prevu pour l'authentification future : chaque UserSession porte un `user_id`
 (None pour l'instant). Le jour ou l'auth arrive, il suffira de keyer le
 registre sur `user_id` au lieu du `session_id` -- voir get_session() -- sans
 toucher au reste du code.
+
+PERSISTANCE LEGERE (optionnelle) : si init_persistence(path) est appele (par
+api.py au demarrage d'un vrai serveur), les reçus valides sont sauvegardes dans
+un fichier JSON HORS DEPOT (.local_state/), et recharges au demarrage suivant.
+JAMAIS dans data/*.csv (corpus CORD intouchable). Le mode demo n'est pas
+persiste. Sans init_persistence (ex. tests via TestClient sans context manager),
+aucune I/O disque -- comportement historique.
 """
+import json
 import math
 
 import numpy as np
@@ -73,6 +81,7 @@ class UserSession:
         self.receipts, self.items = [], []
         self.demo_mode = False
         self._next_id = 0
+        _save()   # persiste l'etat vidé (retire cette session du fichier)
 
     # -- ecriture (memoire seule) --------------------------------------------
     def add_receipt(self, receipt, category, flags, merchant=None):
@@ -94,6 +103,7 @@ class UserSession:
             "tax_ok": flags["tax_ok"], "anomaly": flags["anomaly"],
             "category": category, "merchant": merchant,
         })
+        _save()   # persiste apres chaque reçu validé (si la persistance est active)
         return rid
 
     def load_demo(self, receipts, items):
@@ -249,8 +259,76 @@ def get_session(session_id, user_id=None):
 
 def drop_session(session_id):
     _sessions.pop(session_id, None)
+    _save()
 
 
 def reset_all():
-    """Vide tout le registre (utilise par les tests)."""
+    """Vide tout le registre (utilise par les tests). Ne touche pas au fichier."""
     _sessions.clear()
+
+
+# ---------------------------------------------------------------------------
+# Persistance legere HORS DEPOT (jamais data/*.csv). Desactivee par defaut :
+# seul init_persistence() l'active (api.py au demarrage d'un vrai serveur).
+# ---------------------------------------------------------------------------
+from pathlib import Path   # noqa: E402  (import local a la persistance)
+
+_state_file = None         # None = persistance desactivee (defaut, tests inclus)
+
+
+def init_persistence(path):
+    """Active la persistance vers `path` (hors depot) et recharge l'etat
+    existant. Idempotent. Fichier absent/corrompu -> etat vide, jamais de crash."""
+    global _state_file
+    _state_file = Path(path)
+    _load()
+
+
+def disable_persistence():
+    """Coupe la persistance (utilise par les tests pour ne rien ecrire)."""
+    global _state_file
+    _state_file = None
+
+
+def _load():
+    """Recharge les sessions depuis le fichier JSON. Tout probleme (absent,
+    corrompu, schema inattendu) -> on repart d'un etat vide, sans exception."""
+    if _state_file is None or not _state_file.exists():
+        return
+    try:
+        raw = json.loads(_state_file.read_text(encoding="utf-8"))
+        assert isinstance(raw, dict)
+    except Exception:
+        return
+    for sid, data in raw.items():
+        try:
+            session = UserSession(sid, user_id=data.get("user_id"))
+            session.receipts = list(data.get("receipts", []))
+            session.items = list(data.get("items", []))
+            session._next_id = int(data.get("next_id",
+                                             max((int(r["receipt_id"]) for r in session.receipts),
+                                                 default=-1) + 1))
+            # demo_mode volontairement NON restaure (on ne rouvre pas 800 recus CORD)
+            _sessions[sid] = session
+        except Exception:
+            continue   # une session illisible n'empeche pas de charger les autres
+
+
+def _save():
+    """Sauvegarde les sessions NON-DEMO et NON-VIDES. Ecriture atomique.
+    La persistance ne doit JAMAIS casser le service : toute erreur est avalee."""
+    if _state_file is None:
+        return
+    try:
+        payload = {}
+        for sid, session in _sessions.items():
+            if session.demo_mode or not session.receipts:
+                continue   # jamais les 800 recus CORD du mode demo, ni les sessions vides
+            payload[sid] = {"user_id": session.user_id, "receipts": session.receipts,
+                            "items": session.items, "next_id": session._next_id}
+        _state_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _state_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(_state_file)   # remplacement atomique : jamais de fichier a moitie ecrit
+    except Exception:
+        pass

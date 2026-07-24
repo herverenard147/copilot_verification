@@ -7,6 +7,7 @@ le fallback vision, et servir le front statique de web/.
 
 Lancer :  uvicorn api:app --reload
 """
+import contextlib
 import functools
 import io
 import logging
@@ -44,7 +45,19 @@ from src import session_store
 DATA = Path("data")
 WEB = Path("web")
 
-app = FastAPI(title="Copilote de reçus — API")
+# Persistance legere des sessions, HORS DEPOT (jamais data/*.csv). Activee au
+# demarrage d'un vrai serveur uniquement : TestClient (sans context manager)
+# ne declenche pas le lifespan -> aucune I/O disque pendant les tests.
+STATE_FILE = os.environ.get("COPILOTE_STATE_FILE", ".local_state/sessions.json")
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(app):
+    session_store.init_persistence(STATE_FILE)   # recharge l'etat s'il existe
+    yield
+
+
+app = FastAPI(title="Copilote de reçus — API", lifespan=_lifespan)
 
 
 # ---------------------------------------------------------------------------

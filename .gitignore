@@ -49,6 +49,9 @@ htmlcov/
 test_images/
 data/bench_results.csv
 
+# --- État de session persisté HORS dépôt (jamais versionné, jamais dans data/) ---
+.local_state/
+
 # --- OS ---
 .DS_Store
 Thumbs.db
@@ -66,3 +69,7 @@ Thumbs.db
 !data/loss_curve.csv
 !data/baseline_mlp.joblib
 !data/label_encoder.joblib
+
+# Claude Code / agents : outillage local (symlinks vers .venv, jamais versionne)
+.claude/
+.agents/

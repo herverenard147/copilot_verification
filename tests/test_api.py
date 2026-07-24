@@ -25,10 +25,13 @@ VALID_KEY = "gsk_test_key_1234567890"     # forme plausible, jamais envoyee a Gr
 
 @pytest.fixture(autouse=True)
 def _reset_sessions():
-    """Chaque test part d'un registre de sessions vierge (global de module)."""
+    """Chaque test part d'un registre de sessions vierge (global de module).
+    On coupe aussi la persistance : aucun fichier .local_state pendant les tests."""
     session_store.reset_all()
+    session_store.disable_persistence()
     yield
     session_store.reset_all()
+    session_store.disable_persistence()
 
 
 @pytest.fixture
