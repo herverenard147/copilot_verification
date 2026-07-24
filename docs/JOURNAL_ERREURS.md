@@ -63,3 +63,35 @@ l'inverse.
 **Leçon.** Une métrique doit pénaliser l'invention, pas seulement mesurer la
 quantité. Sans contrôle de plausibilité, « plus de sorties » peut signifier
 « plus d'hallucinations ». Un bench truqué est pire qu'une absence de bench.
+
+---
+
+## E12 — Front obsolète : StaticFiles sans Cache-Control (J-3)
+
+**Symptôme.** Après une modification du front, le navigateur continuait de
+servir un ancien `app.js`/`api.js` : l'onglet Questions (et d'autres) semblait
+répondre « d'un ancien état ». Un hard-refresh (Ctrl+Shift+R) corrigeait le
+symptôme — signature classique d'un cache navigateur.
+
+**Cause.** `StaticFiles` de FastAPI ne pose **aucun en-tête `Cache-Control`**.
+Le navigateur applique alors un cache heuristique et peut resservir une version
+périmée des fichiers statiques sans revalider.
+
+**Vérifié écarté (fausses pistes).** L'index FAISS des reçus utilisateur est
+**reconstruit à chaque requête** (`api_search` : `build_index(embed(...))` sur
+`session.search_texts()`) — testé en réel : un article au nom unique validé
+apparaît immédiatement dans la recherche. Et le endpoint distingue bien
+`scope:"user"` de `scope:"reference"`. Donc ni l'index ni le libellé n'étaient
+en cause : c'était le cache.
+
+**Correctif.** Le middleware pose `Cache-Control: no-cache` sur toute réponse
+**hors `/api`** (front statique). « no-cache » n'interdit pas le cache : il
+**oblige à revalider** via l'ETag (déjà émis par StaticFiles) → `304 Not
+Modified` si inchangé (rapide), `200` + contenu neuf sinon (jamais périmé).
+Vérifié : `curl -I /js/app.js` renvoie `cache-control: no-cache` + `etag`, et
+`If-None-Match` renvoie `304`.
+
+**Leçon.** Servir un front statique sans politique de cache explicite est un
+piège récurrent : toute future modif du front réapparaîtra « obsolète » chez un
+utilisateur qui a déjà chargé la page. Le `no-cache` + ETag est le réglage sûr
+pour une app servie localement.

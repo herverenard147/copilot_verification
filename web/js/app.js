@@ -35,19 +35,24 @@ function money(v) {
 }
 
 // chip 3 états : true=✅ / false=❌ / null=➖ (gris NEUTRE, jamais alarmant)
+// Le title explicite chaque état — notamment ➖, souvent mal compris.
 function chip(label, value) {
-  const map = { true: ['chip--ok', '✅'], false: ['chip--bad', '❌'], null: ['chip--neutral', '➖'] };
+  const map = {
+    true: ['chip--ok', '✅', 'Contrôle conforme'],
+    false: ['chip--bad', '❌', 'Anomalie détectée sur ce contrôle'],
+    null: ['chip--neutral', '➖', 'Non vérifiable : information absente sur ce reçu'],
+  };
   const key = value === true ? 'true' : value === false ? 'false' : 'null';
-  const [cls, icon] = map[key];
-  return `<span class="chip ${cls}">${icon} ${esc(label)}</span>`;
+  const [cls, icon, tip] = map[key];
+  return `<span class="chip ${cls}" title="${esc(tip)}">${icon} ${esc(label)}</span>`;
 }
 
 function engineBadge(engine) {
   if (engine === 'llm_fallback')
-    return `<span class="badge badge--fallback">🛰️ Moteur : LLM vision (fallback)</span>`;
+    return `<span class="badge badge--fallback" title="Un LLM de vision a lu l'image parce que Donut n'y arrivait pas (ex. reçu hors de son domaine).">🛰️ Moteur : LLM vision (fallback)</span>`;
   if (engine === 'fallback_indisponible')
-    return `<span class="badge badge--fallback">⚠️ Fallback vision indisponible — modèle non accessible avec cette clé</span>`;
-  return `<span class="badge badge--donut">🍩 Moteur : Donut</span>`;
+    return `<span class="badge badge--fallback" title="Aucun modèle vision accessible avec la clé Groq configurée.">⚠️ Fallback vision indisponible — modèle non accessible avec cette clé</span>`;
+  return `<span class="badge badge--donut" title="Donut : modèle spécialisé reçus, entraîné sur CORD (tickets indonésiens).">🍩 Moteur : Donut</span>`;
 }
 
 function toast(msg) {
@@ -79,9 +84,11 @@ async function refreshSession() {
     const s = await API.session();
     state.demoMode = !!s.demo_mode;
     state.sessionEmpty = !!s.empty;
+    state.nReceipts = s.n_receipts || 0;
   } catch (e) {
     state.demoMode = false;
     state.sessionEmpty = true;
+    state.nReceipts = 0;
   }
   $('#demo-banner').classList.toggle('hidden', !state.demoMode);
 }
@@ -445,9 +452,79 @@ async function loadDashboard() {
         ${d.anomalies.length > 30 ? `<p class="muted body-sm">… et ${d.anomalies.length - 30} autres.</p>` : ''}
       </div></div>` : '';
 
-    body.innerHTML = kpis + `<div class="grid-2">${cats}${dist}</div>` + anomalies;
+    // Liste des reçus, cliquable : ouvre le détail complet (tâche 1).
+    const rows = (d.receipts || []).map(r => `
+      <tr class="receipt-row" data-id="${r.receipt_id}" title="Cliquer pour voir le détail du reçu">
+        <td><b>#${r.receipt_id}</b></td>
+        <td>${esc(r.category || '—')}</td>
+        <td class="num">${r.n_items}</td>
+        <td class="num">${money(r.total)}</td>
+        <td>${r.anomaly ? '⚠️ à revoir' : '✅'}</td>
+      </tr>`).join('');
+    const receiptsTable = (d.receipts && d.receipts.length) ? `<div class="card">
+      <div class="section-head"><span class="label-caps">Vos reçus (${d.receipts.length})</span>
+        <span class="muted body-sm">Cliquez une ligne pour voir le détail</span></div>
+      <table><thead><tr><th>Reçu</th><th>Catégorie</th><th class="num">Articles</th>
+        <th class="num">Total</th><th>Contrôle</th></tr></thead>
+        <tbody id="receipts-tbody">${rows}</tbody></table></div>` : '';
+
+    body.innerHTML = kpis + `<div class="grid-2">${cats}${dist}</div>` + anomalies + receiptsTable;
+    // Délégation d'événement sur le tbody : survit au re-render, une seule liaison.
+    const tbody = $('#receipts-tbody');
+    if (tbody) tbody.onclick = (e) => {
+      const tr = e.target.closest('.receipt-row');
+      if (tr) renderReceiptDetail(tr.dataset.id);
+    };
   } catch (e) {
     body.innerHTML = `<div class="error-box">${esc(e.message)}</div>`;
+  }
+}
+
+// Détail complet d'un reçu (tâche 1) : réutilise chip() et money(), et le
+// bundle calculé par build_receipt_bundle côté serveur (audit + écriture).
+async function renderReceiptDetail(id) {
+  const body = $('#dashboard-body');
+  body.innerHTML = `<p class="muted">Chargement du reçu #${esc(id)}…</p>`;
+  try {
+    const d = await API.receipt(id);
+    const r = d.receipt, a = d.audit || {};
+    const items = (r.items || []).map(it => `<tr>
+      <td>${esc(it.name || '—')}</td><td class="num">${it.quantity ?? ''}</td>
+      <td class="num">${money(it.unit_price)}</td><td class="num">${money(it.line_price)}</td></tr>`).join('')
+      || `<tr><td colspan="4" class="muted">Aucun article enregistré.</td></tr>`;
+    const chips = chip('Lignes / sous-total', a.line_sum_ok ?? null)
+      + chip('Sous-total + taxe / total', a.total_ok ?? null)
+      + chip('Taux de taxe plausible', a.tax_ok ?? null)
+      + chip("Équilibre de l'écriture", d.balanced ?? null);
+    const journal = d.journal ? d.journal.map(l => `<tr>
+      <td style="color:var(--primary);font-weight:500">${esc(l.account)}</td>
+      <td>${esc(l.label)}</td><td class="num">${money(l.debit)}</td>
+      <td class="num">${money(l.credit)}</td></tr>`).join('')
+      : `<tr><td colspan="4" class="muted">Écriture impossible : montants insuffisants.</td></tr>`;
+
+    body.innerHTML = `
+      <div class="btn-row" style="margin-bottom:var(--md)">
+        <button class="btn" id="detail-back">← Retour au tableau de bord</button>
+      </div>
+      <div class="card"><div class="section-head">
+        <span class="label-caps">Reçu #${esc(id)}${d.category ? ' — ' + esc(d.category) : ''}</span></div>
+        <div class="section-body muted body-sm">Reçu enregistré — aucune image conservée (les données restent en mémoire de session).</div>
+      </div>
+      <div class="card"><div class="section-head"><span class="label-caps">Articles</span></div>
+        <table><thead><tr><th>Article</th><th class="num">Qté</th><th class="num">Prix unit.</th>
+          <th class="num">Total ligne</th></tr></thead><tbody>${items}</tbody></table>
+        <div class="section-body tabular">Sous-total : ${money(r.subtotal)} · Taxe : ${money(r.tax)} · Total : ${money(r.total)}</div>
+      </div>
+      <div class="card"><div class="section-head"><span class="label-caps">Contrôles</span></div>
+        <div class="section-body">${chips}</div></div>
+      <div class="card"><div class="section-head"><span class="label-caps">Écriture comptable</span></div>
+        <table><thead><tr><th>Compte</th><th>Libellé</th><th class="num">Débit</th><th class="num">Crédit</th></tr></thead>
+          <tbody>${journal}</tbody></table></div>`;
+    $('#detail-back').onclick = loadDashboard;
+  } catch (e) {
+    body.innerHTML = `<div class="error-box">${esc(e.message)}</div>
+      <div class="btn-row" style="margin-top:var(--md)"><button class="btn" id="detail-back">← Retour</button></div>`;
+    const b = $('#detail-back'); if (b) b.onclick = loadDashboard;
   }
 }
 
@@ -575,9 +652,18 @@ async function doAsk() {
   try {
     const d = await API.search(q);
     if (!d.search_available) { body.innerHTML = `<div class="banner">${esc(d.note)}</div>`; return; }
-    // Session vide : la recherche porte sur le corpus de référence, clairement signalé.
-    const scopeNote = (d.reference_corpus && d.note)
-      ? `<div class="banner">🔬 ${esc(d.note)}</div>` : '';
+    // Périmètre de recherche affiché clairement, d'après l'état RÉEL renvoyé par
+    // le serveur (scope/demo) — jamais un libellé figé (tâche 3 + anti-obsolescence).
+    let scopeNote;
+    if (d.reference_corpus) {
+      scopeNote = `<div class="banner">🔬 Recherche dans le <b>corpus de référence CORD</b>
+        (aucun reçu personnel pour l'instant — ce ne sont pas vos dépenses).</div>`;
+    } else if (d.demo_mode) {
+      scopeNote = `<div class="banner">🔬 <b>Mode démonstration</b> : recherche dans le corpus CORD, pas vos dépenses réelles.</div>`;
+    } else {
+      const n = d.sources ? d.sources.length : 0;
+      scopeNote = `<div class="banner">🔎 Recherche dans <b>vos reçus</b> (${n} résultat${n > 1 ? 's' : ''} le${n > 1 ? 's' : ''} plus pertinent${n > 1 ? 's' : ''}).</div>`;
+    }
     const answer = scopeNote + `<div class="card"><div class="section-head"><span class="label-caps">Réponse</span></div>
       <div class="section-body">${d.answer ? esc(d.answer)
         : `D'après les reçus les plus pertinents pour : <i>${esc(q)}</i>.` +

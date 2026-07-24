@@ -146,8 +146,26 @@ class UserSession:
                 anomalies.append({"receipt_id": int(row["receipt_id"]), "rule": rule,
                                   "a_label": la, "a_value": va, "b_label": lb, "b_value": vb})
 
+        receipts_list = [{
+            "receipt_id": int(r["receipt_id"]),
+            "category": r.get("category"),
+            "total": _nan(r.get("total")),
+            "n_items": int(r.get("n_items") or 0),
+            "anomaly": bool(r.get("anomaly")) if r.get("anomaly") is not None else False,
+        } for r in self.receipts]
+
         return {"empty": False, "kpis": kpis, "by_category": by_category,
-                "distribution": distribution, "anomalies": anomalies}
+                "distribution": distribution, "anomalies": anomalies,
+                "receipts": receipts_list}
+
+    def get_receipt(self, receipt_id):
+        """Ligne de recu + ses articles (pour l'ecran de detail). (None, []) si absent."""
+        rid = int(receipt_id)
+        row = next((r for r in self.receipts if int(r["receipt_id"]) == rid), None)
+        if row is None:
+            return None, []
+        items = [it for it in self.items if int(it["receipt_id"]) == rid]
+        return row, items
 
     def get_accounting_data(self, period, payment_mode, country):
         receipts = self.receipts_df()

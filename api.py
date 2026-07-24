@@ -66,6 +66,13 @@ async def ensure_session(request: Request, call_next):
     response = await call_next(request)
     if fresh:
         response.set_cookie(SESSION_COOKIE, fresh, httponly=True, samesite="lax")
+    # Anti-obsolescence du front (bug E12) : StaticFiles ne pose aucun
+    # Cache-Control, si bien qu'un navigateur peut resservir un vieux app.js/
+    # api.js apres une modif -> reponses "d'un ancien etat". On force la
+    # revalidation : "no-cache" laisse le cache mais oblige a verifier l'ETag
+    # (304 si inchange, 200+contenu neuf sinon). Rapide ET jamais perime.
+    if not request.url.path.startswith("/api"):
+        response.headers["Cache-Control"] = "no-cache"
     return response
 
 
@@ -419,6 +426,33 @@ def api_dashboard(request: Request):
     data = session.get_dashboard_data()
     data["demo_mode"] = session.demo_mode
     return ok(data)
+
+
+@app.get("/api/receipt/{receipt_id}")
+@safe
+def api_receipt(receipt_id: int, request: Request, country: str = "CI",
+                payment_mode: str = "cash"):
+    """Detail complet d'un recu de la session : articles, montants, 4 controles,
+    ecriture comptable. Reutilise build_receipt_bundle (aucune logique dupliquee)."""
+    session = _session(request)
+    row, items = session.get_receipt(receipt_id)
+    if row is None:
+        return fail("Reçu introuvable.",
+                    detail="Ce reçu n'existe pas dans votre session.",
+                    status=404, engine="session",
+                    suggestions=["Revenir au tableau de bord"])
+    receipt = Receipt(
+        items=[{"name": it.get("name"), "quantity": it.get("quantity"),
+                "unit_price": it.get("unit_price"), "line_price": it.get("line_price")}
+               for it in items],
+        subtotal=_nan(row.get("subtotal")), tax=_nan(row.get("tax")),
+        total=_nan(row.get("total")), receipt_id=receipt_id)
+    bundle = build_receipt_bundle(receipt, country, payment_mode,
+                                  _nan(row.get("merchant")), category=_nan(row.get("category")))
+    bundle["receipt_id"] = receipt_id
+    bundle["category"] = _nan(row.get("category"))
+    bundle["demo_mode"] = session.demo_mode
+    return ok(bundle)
 
 
 # ---------------------------------------------------------------------------

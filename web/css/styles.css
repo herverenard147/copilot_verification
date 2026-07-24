@@ -170,6 +170,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--p
 }
 .demo-banner .btn--ghost:hover { background: rgba(255, 255, 255, .12); }
 
+/* Ligne de reçu cliquable (détail au clic) */
+.receipt-row { cursor: pointer; }
+.receipt-row:hover { background: var(--surface-low); }
+
 /* KPI grisés (état vide du tableau de bord) */
 .kpi--muted .value { color: var(--outline-variant); }
 .kpi--muted { opacity: .7; }
