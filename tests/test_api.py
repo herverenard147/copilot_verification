@@ -42,9 +42,10 @@ def clean_keys(monkeypatch):
     llm._session_keys.clear()
 
 
-def png_bytes():
+def png_bytes(size=(700, 500)):
+    """Image au-dessus du seuil de resolution par defaut (~0.25 Mpx)."""
     buf = io.BytesIO()
-    Image.new("RGB", (64, 64), (210, 210, 210)).save(buf, "PNG")
+    Image.new("RGB", size, (210, 210, 210)).save(buf, "PNG")
     return buf.getvalue()
 
 
@@ -62,6 +63,38 @@ def test_extract_image_valide_200(monkeypatch):
     assert body["success"] is True
     assert body["engine"] in ("donut", "llm_fallback")
     assert "audit" in body and "journal" in body
+
+
+def test_extract_image_trop_basse_resolution_rejetee(monkeypatch):
+    """Garde-fou E10 : une image 100x100 est rejetee proprement, SANS tenter
+    l'extraction (le modele ne doit pas halluciner sur du flou)."""
+    def _boom():
+        raise AssertionError("Donut ne doit pas etre appele sur une image rejetee")
+    monkeypatch.setattr(api, "get_donut", _boom)
+    monkeypatch.setattr(api, "extract",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("pas d'extraction")))
+
+    r = client.post("/api/extract",
+                    files={"file": ("vignette.png", png_bytes((100, 100)), "image/png")},
+                    data={"country": "ID"})
+    assert r.status_code != 500
+    body = r.json()
+    assert body["success"] is False
+    assert "résolution" in (body["error"] + body["detail"]).lower()
+    assert body["resolution"]["ok"] is False
+    assert body["resolution"]["width"] == 100 and body["resolution"]["height"] == 100
+
+
+def test_extract_image_modeste_non_bloquee(monkeypatch):
+    """Une image legitimement modeste (800x600 ~0.48 Mpx) PASSE le garde-fou."""
+    monkeypatch.setattr(api, "get_donut", lambda: (None, None, "cpu"))
+    monkeypatch.setattr(api, "extract",
+                        lambda *a, **k: {"menu": [{"nm": "Article", "price": "1000"}],
+                                          "total": {"total_price": "1000"}})
+    r = client.post("/api/extract",
+                    files={"file": ("recu.png", png_bytes((800, 600)), "image/png")},
+                    data={"country": "ID"})
+    assert r.status_code == 200 and r.json()["success"] is True
 
 
 def test_extract_pas_une_image():

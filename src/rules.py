@@ -35,12 +35,32 @@ def check_tax_rate(receipt, country="ID", band=0.05):
     return abs(rate - TAX_RATES[country]) <= band
 
 
+def check_magnitude(receipt, factor=50):
+    """R9 : plausibilite de MAGNITUDE. Le total et la somme des lignes doivent
+    rester dans un rapport raisonnable (facteur 50 par defaut).
+
+    Anomalie si total > factor * somme_lignes OU total < somme_lignes / factor.
+    Un total 100x superieur a la somme des lignes ne traduit pas un arrondi
+    mais une HALLUCINATION (ex. total 234 295 700 Rp lu sur une vignette floue)
+    ou une erreur d'OCR grossiere. Complementaire de R1/R2, qui comparent des
+    ecarts fins : R9 attrape les ecarts d'ordre de grandeur.
+
+    Retourne None si le total OU la somme des lignes manque (logique 3 etats).
+    """
+    total = receipt.total
+    line_sum = receipt.items_sum()
+    if total is None or line_sum is None or line_sum <= 0:
+        return None
+    return (line_sum / factor) <= total <= (factor * line_sum)
+
+
 def audit(receipt, country="ID"):
     """Passe toutes les regles et retourne les drapeaux."""
     results = {
         "line_sum_ok": check_line_sum(receipt),
         "total_ok": check_total(receipt),
         "tax_ok": check_tax_rate(receipt, country),
+        "magnitude_ok": check_magnitude(receipt),
     }
     results["anomaly"] = any(v is False for v in results.values())
     return results

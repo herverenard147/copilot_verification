@@ -24,6 +24,32 @@ except ImportError:          # degradation : sans OpenCV, on fait le minimum via
 TARGET_HEIGHT = 1280         # hauteur visee : assez grand pour Donut, pas trop lourd
 MAX_UPSCALE = 2.0            # on n'agrandit jamais une petite image de plus de x2
 
+# Garde-fou de resolution (bug E10). En dessous de ~0.3 Mpx, il n'y a plus
+# assez de pixels pour LIRE : le modele genere alors du texte plausible sur du
+# flou (ideogrammes, prix inventes) au lieu d'echouer honnetement. On rejette
+# donc AVANT extraction. Seuil volontairement LARGE : il attrape les vignettes
+# de banques d'images (0.04-0.15 Mpx) sans bloquer une photo legitimement
+# modeste (800x600 = 0.48 Mpx, ou un petit scan CORD a 0.28 Mpx, passent). Fixe
+# a 0.25 Mpx : au-dessus de toutes les vignettes observees, sous les vraies photos.
+MIN_PIXELS = 250_000         # ~0.25 Mpx (marge sous le "~0.3 Mpx" annonce)
+
+
+def resolution_info(image):
+    """Renvoie la resolution de l'image source et si elle est exploitable.
+
+    {width, height, pixels, megapixels, min_megapixels, ok}. `ok` est False
+    quand l'image est trop petite pour une extraction fiable -- a verifier
+    AVANT tout traitement (l'appelant repond alors proprement, sans halluciner).
+    """
+    w, h = image.size
+    pixels = w * h
+    return {
+        "width": w, "height": h, "pixels": pixels,
+        "megapixels": round(pixels / 1e6, 3),
+        "min_megapixels": round(MIN_PIXELS / 1e6, 2),
+        "ok": pixels >= MIN_PIXELS,
+    }
+
 
 def to_rgb(image):
     """Garantit une image PIL en mode RGB (Donut n'accepte que ca)."""

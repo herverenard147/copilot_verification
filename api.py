@@ -31,7 +31,7 @@ from src.accounting import (
     journal_entry, is_balanced, vat_recoverable, vat_summary, expense_report,
     DISCLAIMER, CHART_OF_ACCOUNTS, PAYMENT_ACCOUNTS,
 )
-from src.preprocess import preprocess_image
+from src.preprocess import preprocess_image, resolution_info
 from src.extractor import extract
 from src.llm import (
     extract_receipt_via_vision, VisionUnavailable,
@@ -189,18 +189,22 @@ def ok(payload):
     return JSONResponse(to_jsonable(data))
 
 
-def fail(error_msg, detail="", status=422, engine="donut", suggestions=None):
+def fail(error_msg, detail="", status=422, engine="donut", suggestions=None, extra=None):
     """Erreur JSON propre et STRUCTUREE. Le message est humain et court ; le
     traceback complet part dans les logs serveur, JAMAIS dans la reponse HTTP.
-    Statut != 500 : une image inattendue ne doit pas casser la demo."""
-    return JSONResponse({
+    Statut != 500 : une image inattendue ne doit pas casser la demo.
+    `extra` : champs supplementaires a fusionner (ex. {"resolution": {...}})."""
+    payload = {
         "success": False,
         "error": error_msg,
         "detail": detail,
         "engine": engine,
         "suggestions": suggestions or ["Réessayer avec une photo plus nette",
                                         "Saisir les données manuellement"],
-    }, status_code=status)
+    }
+    if extra:
+        payload.update(extra)
+    return JSONResponse(to_jsonable(payload), status_code=status)
 
 
 def safe(fn):
@@ -278,6 +282,22 @@ def api_extract(file: UploadFile = File(...), country: str = Form("CI"),
         return fail("Impossible de lire ce reçu",
                     detail="Le fichier n'est pas une image valide (JPG ou PNG attendu).",
                     status=422)
+
+    # Garde-fou de resolution (bug E10) : trop peu de pixels -> le modele
+    # hallucine du texte sur du flou. On rejette AVANT toute extraction.
+    res = resolution_info(image)
+    if not res["ok"]:
+        return fail(
+            "Image trop basse résolution",
+            detail=(f"Cette image fait {res['width']}x{res['height']} px "
+                    f"(~{res['megapixels']} Mpx). Une extraction fiable nécessite au "
+                    f"moins ~{res['min_megapixels']} Mpx pour éviter que le modèle "
+                    f"invente du texte sur du flou."),
+            status=422, engine="resolution",
+            suggestions=["Prendre une nouvelle photo, nette et de près",
+                         "Saisir les données manuellement"],
+            extra={"resolution": res},
+        )
 
     try:
         pre_img, pre_info = preprocess_image(image)
