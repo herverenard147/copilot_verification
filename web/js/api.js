@@ -40,8 +40,9 @@ const API = {
     return this._json(await fetch('/api/dashboard'));
   },
 
-  async receipt(id) {
-    return this._json(await fetch('/api/receipt/' + encodeURIComponent(id)));
+  async receipt(id, country) {
+    const q = country ? '?country=' + encodeURIComponent(country) : '';
+    return this._json(await fetch('/api/receipt/' + encodeURIComponent(id) + q));
   },
 
   async accounting(period, paymentMode, country) {

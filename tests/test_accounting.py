@@ -114,6 +114,32 @@ def test_mapping_categorie_et_fallback():
     assert map_category_to_account("categorie totalement inconnue") == DEFAULT_EXPENSE_ACCOUNT
     assert map_category_to_account(None) == DEFAULT_EXPENSE_ACCOUNT
 
+
+def test_mapping_labels_kmeans_cord():
+    """Les 9 labels reels des clusters CORD sont mappes (sinon tout -> 638)."""
+    assert map_category_to_account("ICED TEA") == "601"
+    assert map_category_to_account("Mineral Water") == "601"
+    assert map_category_to_account("TWIST DONUT") == "601"
+    assert map_category_to_account("Original Hugarian ") == "601"      # espace final géré
+    assert map_category_to_account("6001-Plastic Bag S") == "605"      # emballage
+    assert map_category_to_account("autre") == "638"
+    assert map_category_to_account("un cluster jamais vu") == DEFAULT_EXPENSE_ACCOUNT  # fallback robuste
+
+
+def test_recu_0_audit_multi_comptes_601_605_638():
+    """Reçu #0 de l'audit (7 catégories) -> écriture à plusieurs comptes."""
+    it = [("6001-Plastic Bag S", 100000), ("GONG GIBAB", 50000), ("ICED TEA", 30000),
+          ("NASI PUTIH", 40000), ("Original Hugarian ", 20000), ("TWIST DONUT", 60000),
+          ("autre", 10000)]
+    items = [{"name": n, "quantity": 1, "unit_price": p, "line_price": p, "category": c}
+             for i, (c, p) in enumerate(it) for n in [f"a{i}"]]
+    total = sum(p for _, p in it)
+    r = Receipt(items, subtotal=total, tax=None, total=total)
+    entry = journal_entry(r, category="autre", merchant=None)
+    accounts = {l["account"] for l in entry if l["debit"] > 0}
+    assert {"601", "605", "638"}.issubset(accounts)   # au moins ces 3 comptes de charge
+    assert is_balanced(entry) is True
+
     mapping_perso = {"boissons": "605"}
     assert map_category_to_account("boissons", mapping=mapping_perso) == "605"
     assert map_category_to_account("transport", mapping=mapping_perso) == DEFAULT_EXPENSE_ACCOUNT

@@ -470,7 +470,12 @@ async function loadDashboard() {
 async function openReceiptDetail(id, container, restore) {
   container.innerHTML = `<p class="muted">Chargement du reçu #${esc(id)}…</p>`;
   try {
-    container.innerHTML = receiptDetailHtml(id, await API.receipt(id));
+    // Recalcul de l'audit avec le BON pays : les reçus de démo sont le corpus
+    // CORD (indonésien) -> ID ; sinon le pays sélectionné. Sans ça, la taxe
+    // indonésienne était jugée sous le seuil ivoirien et le chip se contredisait
+    // entre le dashboard (ID) et le détail.
+    const country = state.demoMode ? 'ID' : state.country;
+    container.innerHTML = receiptDetailHtml(id, await API.receipt(id, country));
   } catch (e) {
     container.innerHTML = `<div class="error-box">${esc(e.message)}</div>
       <div class="btn-row" style="margin-top:var(--md)"><button class="btn" id="detail-back">← Retour</button></div>`;

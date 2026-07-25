@@ -282,6 +282,37 @@ def test_accounting_expose_receipts_avec_motif_tva():
     assert r["receipt_id"] == 0 and "identifi" in r["vat_reason"].lower()
 
 
+def test_chip_taxe_coherent_dashboard_et_detail():
+    """Non-régression : un reçu indonésien (TVA 11%) doit donner le MÊME verdict
+    de chip taxe vu depuis le dashboard (flag stocké, ID) et depuis le détail
+    (recalculé). Le défaut serveur ID garantit la cohérence ; l'ancien défaut
+    CI (18%) produisait la contradiction."""
+    sid = {"X-Session-Id": "coherence-tax"}
+    payload = {"items": [{"name": "x", "line_price": 10000, "category": "food"}],
+               "subtotal": 10000, "tax": 1100, "total": 11100, "category": "food",
+               "country": "ID", "payment_mode": "cash", "persist": True}
+    v = client.post("/api/validate", json=payload, headers=sid).json()
+    stored = v["audit"]["tax_ok"]                       # ce que reflète le dashboard (ID)
+    assert stored is True                               # 11% ~ seuil ID 11%
+
+    # détail SANS country -> défaut serveur ID -> cohérent
+    assert client.get("/api/receipt/0", headers=sid).json()["audit"]["tax_ok"] == stored
+    # détail AVEC country=ID (ce que le front envoie en démo) -> cohérent
+    assert client.get("/api/receipt/0?country=ID", headers=sid).json()["audit"]["tax_ok"] == stored
+    # preuve du bug d'origine : CI (18%) se serait contredit
+    assert client.get("/api/receipt/0?country=CI", headers=sid).json()["audit"]["tax_ok"] != stored
+
+
+def test_recu_0_demo_ecriture_multi_comptes():
+    """Reçu #0 du corpus CORD (démo) -> détail avec écriture multi-comptes."""
+    sid = {"X-Session-Id": "demo-multi"}
+    client.post("/api/settings/demo", json={"enabled": True}, headers=sid)
+    d = client.get("/api/receipt/0?country=ID", headers=sid).json()
+    charge = [l for l in d["journal"] if l["debit"] > 0]
+    assert {"601", "605", "638"}.issubset({l["account"] for l in charge})
+    assert d["balanced"] is True
+
+
 def test_receipt_detail_multi_comptes_apres_validation():
     """Chantier 1+2 : un reçu validé multi-catégories -> détail à écriture
     multi-comptes (cohérence entre validation et détail persisté)."""

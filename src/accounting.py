@@ -38,6 +38,14 @@ DEFAULT_CATEGORY_ACCOUNTS = {
     "advertising": "627", "reception": "627", "restaurant": "627", "hotel": "627",
     "telecom": "628", "communication": "628", "internet": "628",
     "supplies": "605", "office": "605", "stationery": "605",
+    # Labels reels des clusters KMeans du corpus CORD (nommes d'apres un article
+    # representatif). Sans ces cles, 100% des recus tombaient sur 638 (fallback)
+    # et l'ecriture n'avait qu'une ligne. "autre" reste volontairement en 638.
+    "autre": "638",
+    "6001-plastic bag s": "605",        # emballage -> autres achats
+    "twist donut": "601", "original hugarian": "601", "nasi putih": "601",
+    "tripple cheese": "601", "iced tea": "601", "gong gibab": "601",
+    "mineral water": "601",
 }
 
 PAYMENT_ACCOUNTS = {"cash": "571", "bank": "521", "credit": "401"}

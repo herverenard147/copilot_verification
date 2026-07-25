@@ -286,7 +286,7 @@ def build_receipt_bundle(receipt, country, payment_mode, merchant, category=None
 # ---------------------------------------------------------------------------
 @app.post("/api/extract")
 @safe
-def api_extract(file: UploadFile = File(...), country: str = Form("CI"),
+def api_extract(file: UploadFile = File(...), country: str = Form("ID"),
                 payment_mode: str = Form("cash"), merchant: str = Form(None)):
     try:
         raw = file.file.read()
@@ -385,7 +385,7 @@ class ValidatePayload(BaseModel):
     category: str | None = None
     account: str | None = None          # compte choisi manuellement (selectbox du front)
     merchant: str | None = None
-    country: str = "CI"
+    country: str = "ID"                 # defaut ID : le corpus CORD est indonesien
     payment_mode: str = "cash"
     persist: bool = True
 
@@ -445,7 +445,7 @@ def api_dashboard(request: Request):
 
 @app.get("/api/receipt/{receipt_id}")
 @safe
-def api_receipt(receipt_id: int, request: Request, country: str = "CI",
+def api_receipt(receipt_id: int, request: Request, country: str = "ID",
                 payment_mode: str = "cash"):
     """Detail complet d'un recu de la session : articles, montants, 4 controles,
     ecriture comptable. Reutilise build_receipt_bundle (aucune logique dupliquee)."""
@@ -477,7 +477,7 @@ def api_receipt(receipt_id: int, request: Request, country: str = "CI",
 @app.get("/api/accounting")
 @safe
 def api_accounting(request: Request, period: str = "Mois en cours",
-                   payment_mode: str = "cash", country: str = "CI"):
+                   payment_mode: str = "cash", country: str = "ID"):
     # Comptabilise les recus de CETTE session, PAS le corpus CORD.
     session = _session(request)
     data = session.get_accounting_data(period, payment_mode, country)
