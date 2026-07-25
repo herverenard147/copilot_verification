@@ -47,6 +47,93 @@ function chip(label, value) {
   return `<span class="chip ${cls}" title="${esc(tip)}">${icon} ${esc(label)}</span>`;
 }
 
+// Formate un taux : 10.75 -> "10,75 %", 25 -> "25 %".
+function pct(rate) {
+  return rate.toLocaleString('fr-FR', { maximumFractionDigits: 2 }) + ' %';
+}
+
+// TÂCHE 1 — les 4 indicateurs de contrôle, chacun avec un titre clair, une
+// explication chiffrée VISIBLE (pas un tooltip) et un verdict en couleur.
+function control(title, value, msgs) {
+  const key = value === true ? 'ok' : value === false ? 'bad' : 'none';
+  const meta = { ok: ['chip--ok', '✅'], bad: ['chip--bad', '❌'], none: ['chip--neutral', '➖'] }[key];
+  const explainCls = key === 'bad' ? 'control-explain control-explain--bad' : 'control-explain';
+  return `<div class="control">
+    <span class="chip ${meta[0]}">${meta[1]} ${esc(title)}</span>
+    <div class="${explainCls}">${esc(msgs[key])}</div></div>`;
+}
+
+function controlsHtml(audit, balanced, receipt, journal, country) {
+  const a = audit || {};
+  const sub = receipt.subtotal, tax = receipt.tax, total = receipt.total;
+  const itemsSum = (receipt.items || []).reduce((s, it) => s + (Number(it.line_price) || 0), 0);
+  const td = (journal || []).reduce((s, l) => s + (l.debit || 0), 0);
+  const tc = (journal || []).reduce((s, l) => s + (l.credit || 0), 0);
+  const isID = country !== 'CI';
+  const ctyLabel = isID ? 'indonésien' : 'ivoirien';
+  const expRate = isID ? 11 : 18;
+  const rate = (tax && sub) ? (tax / sub * 100) : null;
+  const attendu = (sub || 0) + (tax || 0), diff = (total || 0) - attendu;
+
+  return control('Somme des articles', a.line_sum_ok, {
+      ok: `La somme des articles (${money(itemsSum)}) correspond au sous-total (${money(sub)})`,
+      bad: `⚠️ La somme des articles (${money(itemsSum)}) ne correspond pas au sous-total annoncé (${money(sub)}) — écart de ${money(Math.abs(itemsSum - (sub || 0)))}. Vérifiez qu'aucun article ne manque.`,
+      none: `Le sous-total n'est pas indiqué sur ce reçu — vérification impossible`,
+    })
+    + control('Calcul du total', a.total_ok, {
+      ok: `Sous-total (${money(sub)}) + taxe (${money(tax || 0)}) = total (${money(total)}) ✓`,
+      bad: `⚠️ Sous-total (${money(sub)}) + taxe (${money(tax || 0)}) = ${money(attendu)}, mais le total indiqué est ${money(total)}. ${diff >= 0 ? 'Il manque ' + money(diff) : 'Il y a ' + money(-diff) + ' de trop'} — peut-être un frais de service non extrait.`,
+      none: `Le sous-total ou le total n'est pas indiqué — vérification impossible`,
+    })
+    + control('Taux de taxe', a.tax_ok, {
+      ok: `Taxe de ${rate != null ? pct(rate) : '—'} — cohérent avec le taux ${ctyLabel} (≈${expRate} %)`,
+      bad: `⚠️ Taxe de ${rate != null ? pct(rate) : '?'} — inhabituel pour le pays sélectionné (attendu ≈${expRate} %). Vérifiez le montant de la taxe.`,
+      none: `Pas de taxe sur ce reçu — non vérifiable`,
+    })
+    + control('Équilibre comptable', balanced, {
+      ok: `Total des débits (${money(td)}) = total des crédits (${money(tc)}) ✓`,
+      bad: `⚠️ L'écriture est déséquilibrée — contactez un comptable`,
+      none: `Écriture non générée — données insuffisantes`,
+    });
+}
+
+// TÂCHE 3 — points précis à vérifier (encart en tête de détail / d'analyse).
+function reviewPoints(audit, balanced, receipt) {
+  const a = audit || {};
+  const sub = receipt.subtotal, tax = receipt.tax, total = receipt.total;
+  const itemsSum = (receipt.items || []).reduce((s, it) => s + (Number(it.line_price) || 0), 0);
+  const pts = [];
+  if (a.line_sum_ok === false) pts.push(`Somme des articles : écart de ${money(Math.abs(itemsSum - (sub || 0)))} entre les articles et le sous-total`);
+  if (a.total_ok === false) { const d = (total || 0) - ((sub || 0) + (tax || 0)); pts.push(`Calcul du total : il ${d >= 0 ? 'manque ' + money(d) : 'y a ' + money(-d) + ' de trop'} entre sous-total + taxe et le total affiché`); }
+  if (a.tax_ok === false) pts.push(`Taux de taxe : le taux paraît inhabituel pour le pays sélectionné`);
+  if (balanced === false) pts.push(`Équilibre comptable : l'écriture est déséquilibrée`);
+  return pts;
+}
+
+function reviewBanner(pts, editable) {
+  if (!pts.length) return '';
+  const close = editable
+    ? "→ Corrigez les montants ci-dessus, les contrôles et l'écriture se recalculent automatiquement."
+    : "→ Vérifiez ces montants sur le reçu d'origine.";
+  return `<div class="banner">Ce reçu a ${pts.length} point${pts.length > 1 ? 's' : ''} à vérifier :
+    <ul style="margin:var(--xs) 0 var(--xs) var(--lg)">${pts.map(p => `<li>${esc(p)}</li>`).join('')}</ul>${close}</div>`;
+}
+
+// TÂCHE 2 — état d'un reçu, progressif et jamais alarmiste.
+function receiptStatus(r) {
+  const flags = [r.line_sum_ok, r.total_ok, r.tax_ok];
+  let fails = flags.filter(f => f === false).length;
+  if (fails === 0 && r.anomaly) fails = 1;   // ex. contrôle magnitude non exposé -> 1 point
+  if (fails > 0) return {
+    status: 'review', rowClass: 'receipt-review',
+    badge: `<span class="badge badge--review">⚠️ ${fails} point${fails > 1 ? 's' : ''} à vérifier</span>`,
+  };
+  if (flags.some(f => f === true)) return {
+    status: 'conforme', rowClass: '', badge: `<span class="badge badge--verified">✓ Vérifié</span>`,
+  };
+  return { status: 'nodata', rowClass: '', badge: `<span class="badge badge--nodata">— Données insuffisantes</span>` };
+}
+
 function engineBadge(engine) {
   if (engine === 'llm_fallback')
     return `<span class="badge badge--fallback" title="Un LLM de vision a lu l'image parce que Donut n'y arrivait pas (ex. reçu hors de son domaine).">🛰️ Moteur : LLM vision (fallback)</span>`;
@@ -245,6 +332,7 @@ function renderResult(data) {
     <div style="margin-bottom:var(--md)">${engineBadge(data.engine)}
       ${data.fallback_note ? `<span class="muted body-sm" style="margin-left:var(--sm)">${esc(data.fallback_note)}</span>` : ''}
     </div>
+    <p class="muted body-sm" style="margin-bottom:var(--md)">💡 Vous pouvez modifier chaque montant dans le tableau. Les contrôles et l'écriture comptable se mettent à jour en temps réel.</p>
     <div class="analyze-grid">
       <div>${imgHtml}</div>
       <div class="stack">
@@ -296,7 +384,7 @@ function renderResult(data) {
   $('#sel-account').value = proposedAccount;
 
   // premier rendu des chips / écriture depuis la réponse extract
-  paintAudit(data.audit, data.journal, data.balanced, data.vat, r.tax);
+  paintAudit(data.audit, data.journal, data.balanced, data.vat, r, state.country);
   updateVerifyTag(r);
 
   // câblage des recalculs live
@@ -351,20 +439,17 @@ async function recompute() {
   const payload = readReceiptFromDOM();
   try {
     const data = await API.validate(payload);
-    paintAudit(data.audit, data.journal, data.balanced, data.vat, payload.tax);
+    paintAudit(data.audit, data.journal, data.balanced, data.vat, data.receipt, state.country);
     updateVerifyTag(data.receipt);
   } catch (e) {
     toast('Recalcul impossible : ' + e.message);
   }
 }
 
-function paintAudit(audit, journal, balanced, vat, receiptTax) {
-  const a = audit || {};
-  $('#chips').innerHTML =
-    chip('Lignes / sous-total', a.line_sum_ok ?? null) +
-    chip('Sous-total + taxe / total', a.total_ok ?? null) +
-    chip('Taux de taxe plausible', a.tax_ok ?? null) +
-    chip("Équilibre de l'écriture", balanced ?? null);
+function paintAudit(audit, journal, balanced, vat, receipt, country) {
+  const pts = reviewPoints(audit, balanced, receipt);
+  $('#chips').innerHTML = reviewBanner(pts, true)
+    + controlsHtml(audit, balanced, receipt, journal, country);
 
   const jb = $('#journal-body'), jf = $('#journal-footer');
   if (!journal) {
@@ -379,11 +464,12 @@ function paintAudit(audit, journal, balanced, vat, receiptTax) {
     <td class="num">${money(l.credit)}</td></tr>`).join('');
   const td = journal.reduce((s, l) => s + (l.debit || 0), 0);
   const tc = journal.reduce((s, l) => s + (l.credit || 0), 0);
-  const vatNote = (vat && vat.recoverable === 0 && receiptTax)
-    ? `<div class="banner" style="margin-top:var(--sm)">⚠️ TVA non récupérable — ${esc(vat.reason)}. Elle est réintégrée dans la charge.</div>`
+  const vatNote = (vat && vat.recoverable === 0 && receipt.tax)
+    ? `<div class="banner" style="margin-top:var(--sm)">TVA non récupérable — ${esc(vat.reason)}. Elle est réintégrée dans la charge.</div>`
     : '';
   jf.innerHTML = `<div class="tabular">Total débit : ${money(td)} · Total crédit : ${money(tc)} ·
-    ${balanced ? '✅ équilibré' : '❌ déséquilibré'}</div>${vatNote}`;
+    ${balanced ? '✅ équilibré' : '❌ déséquilibré'}</div>${vatNote}
+    <p class="muted body-sm" style="margin-top:var(--sm)">Cette écriture est une proposition automatique basée sur la catégorie détectée pour chaque article. Elle doit être validée par un comptable avant tout usage officiel. Vous pouvez modifier les montants ci-dessus : les contrôles et l'écriture se recalculeront automatiquement.</p>`;
 }
 
 function updateVerifyTag(r) {
@@ -424,7 +510,9 @@ async function loadDashboard() {
       <div class="kpi"><div class="label-caps">Reçus analysés</div><div class="value">${money(k.n_receipts)}</div></div>
       <div class="kpi"><div class="label-caps">Articles</div><div class="value">${money(k.n_items)}</div></div>
       <div class="kpi"><div class="label-caps">Dépense totale</div><div class="value">${money(k.total_spend)}</div></div>
-      <div class="kpi ${k.n_anomalies ? 'kpi--alert' : ''}"><div class="label-caps">Anomalies</div><div class="value">${money(k.n_anomalies)}</div></div>
+      <div class="kpi ${k.n_anomalies ? 'kpi--alert receipt-open-kpi' : ''}" id="kpi-anomalies"
+           ${k.n_anomalies ? 'title="Voir les reçus à vérifier" style="cursor:pointer"' : ''}>
+        <div class="label-caps">À vérifier</div><div class="value">${money(k.n_anomalies)}</div></div>
     </div>`;
 
     const maxCat = Math.max(...d.by_category.map(c => c.total), 1);
@@ -441,10 +529,17 @@ async function loadDashboard() {
           <span class="bar-track"><span class="bar-fill" style="width:${(x.count / maxD * 100).toFixed(1)}%"></span></span>
           <span class="num">${x.count}</span></div>`).join('')}</div></div>`;
 
+    const totalReceipts = k.n_receipts || (d.receipts ? d.receipts.length : 0);
+    const anomalyRate = totalReceipts ? (k.n_anomalies / totalReceipts * 100) : 0;
+    const highRateNote = anomalyRate > 15 ? `<p class="banner">ℹ️ ${money(k.n_anomalies)} reçus sur ${money(totalReceipts)} (${anomalyRate.toLocaleString('fr-FR', { maximumFractionDigits: 1 })} %) présentent au moins une incohérence. La cause la plus fréquente est un écart entre sous-total + taxe et total, souvent dû à des frais de service ou pourboires non extraits par le modèle.</p>` : '';
     const anomalies = d.anomalies.length ? `<div class="card">
-      <div class="section-head"><span class="label-caps">Anomalies actives (${d.anomalies.length})</span></div>
+      <div class="section-head"><span class="label-caps">Reçus à vérifier (${d.anomalies.length})</span></div>
+      <div class="section-body">
+        <p class="muted body-sm">Ces reçus présentent des incohérences dans leurs montants. Cliquez sur un reçu pour voir le détail et corriger si nécessaire. Un signalement ne signifie pas une erreur certaine — il peut s'agir d'un frais de service non extrait ou d'un arrondi de caisse.</p>
+        ${highRateNote}
+      </div>
       <div class="section-body stack">${d.anomalies.slice(0, 30).map(a => `
-        <div class="card receipt-open" data-id="${a.receipt_id}" title="Voir le détail du reçu"><div class="section-body">
+        <div class="card receipt-open receipt-review" data-id="${a.receipt_id}" title="Voir le détail du reçu"><div class="section-body">
           <b>Reçu #${a.receipt_id}</b> — ${esc(a.rule)}
           ${a.a_label ? `<div class="muted body-sm tabular">${esc(a.a_label)} : ${money(a.a_value)} · ${esc(a.b_label)} : ${money(a.b_value)}
             · Écart : ${money(Math.abs((a.b_value || 0) - (a.a_value || 0)))}</div>` : ''}
@@ -452,11 +547,18 @@ async function loadDashboard() {
         ${d.anomalies.length > 30 ? `<p class="muted body-sm">… et ${d.anomalies.length - 30} autres.</p>` : ''}
       </div></div>` : '';
 
-    // Liste des reçus, cliquable (composant réutilisé pour les listes filtrées).
+    // Liste des reçus, cliquable + filtres rapides (Tâche 3).
     body.innerHTML = kpis + `<div class="grid-2">${cats}${dist}</div>` + anomalies
-      + receiptsListCard(d.receipts, 'Vos reçus');
+      + receiptsListCard(d.receipts, 'Vos reçus', { id: 'dash-receipts', filters: true });
     // Délégation unique sur le tab-body : couvre lignes de liste ET cartes d'anomalie.
     wireReceiptOpen($('#dashboard-body'), loadDashboard);
+    // Filtres rapides + KPI "à vérifier" cliquable (du chiffre aux reçus en 1 clic).
+    $$('#receipt-filters .filter-btn').forEach(b => b.onclick = () => applyReceiptFilter(b.dataset.filter));
+    const kpiA = $('#kpi-anomalies');
+    if (kpiA && k.n_anomalies) kpiA.onclick = () => {
+      applyReceiptFilter('review');
+      $('#dash-receipts').scrollIntoView({ behavior: 'smooth' });
+    };
   } catch (e) {
     body.innerHTML = `<div class="error-box">${esc(e.message)}</div>`;
   }
@@ -475,7 +577,7 @@ async function openReceiptDetail(id, container, restore) {
     // indonésienne était jugée sous le seuil ivoirien et le chip se contredisait
     // entre le dashboard (ID) et le détail.
     const country = state.demoMode ? 'ID' : state.country;
-    container.innerHTML = receiptDetailHtml(id, await API.receipt(id, country));
+    container.innerHTML = receiptDetailHtml(id, await API.receipt(id, country), country);
   } catch (e) {
     container.innerHTML = `<div class="error-box">${esc(e.message)}</div>
       <div class="btn-row" style="margin-top:var(--md)"><button class="btn" id="detail-back">← Retour</button></div>`;
@@ -484,17 +586,15 @@ async function openReceiptDetail(id, container, restore) {
   if (b) b.onclick = restore;
 }
 
-// Détail (réutilise chip() et money() ; bundle serveur = build_receipt_bundle).
-function receiptDetailHtml(id, d) {
+// Détail (réutilise controlsHtml() et money() ; bundle serveur = build_receipt_bundle).
+function receiptDetailHtml(id, d, country) {
   const r = d.receipt, a = d.audit || {};
   const items = (r.items || []).map(it => `<tr>
     <td>${esc(it.name || '—')}</td><td class="num">${it.quantity ?? ''}</td>
     <td class="num">${money(it.unit_price)}</td><td class="num">${money(it.line_price)}</td></tr>`).join('')
     || `<tr><td colspan="4" class="muted">Aucun article enregistré.</td></tr>`;
-  const chips = chip('Lignes / sous-total', a.line_sum_ok ?? null)
-    + chip('Sous-total + taxe / total', a.total_ok ?? null)
-    + chip('Taux de taxe plausible', a.tax_ok ?? null)
-    + chip("Équilibre de l'écriture", d.balanced ?? null);
+  const controls = controlsHtml(a, d.balanced, r, d.journal, country);
+  const encart = reviewBanner(reviewPoints(a, d.balanced, r), false);
   const journal = d.journal ? d.journal.map(l => `<tr>
     <td style="color:var(--primary);font-weight:500">${esc(l.account)}</td>
     <td>${esc(l.label)}</td><td class="num">${money(l.debit)}</td>
@@ -503,6 +603,7 @@ function receiptDetailHtml(id, d) {
   return `
     <div class="btn-row" style="margin-bottom:var(--md)">
       <button class="btn" id="detail-back">← Retour</button></div>
+    ${encart}
     <div class="card"><div class="section-head">
       <span class="label-caps">Reçu #${esc(id)}${d.category ? ' — ' + esc(d.category) : ''}</span></div>
       <div class="section-body muted body-sm">Reçu enregistré — aucune image conservée (données en mémoire de session).</div></div>
@@ -511,7 +612,7 @@ function receiptDetailHtml(id, d) {
         <th class="num">Total ligne</th></tr></thead><tbody>${items}</tbody></table>
       <div class="section-body tabular">Sous-total : ${money(r.subtotal)} · Taxe : ${money(r.tax)} · Total : ${money(r.total)}</div></div>
     <div class="card"><div class="section-head"><span class="label-caps">Contrôles</span></div>
-      <div class="section-body">${chips}</div></div>
+      <div class="section-body">${controls}</div></div>
     <div class="card"><div class="section-head"><span class="label-caps">Écriture comptable</span></div>
       <table><thead><tr><th>Compte</th><th>Libellé</th><th class="num">Débit</th><th class="num">Crédit</th></tr></thead>
         <tbody>${journal}</tbody></table></div>`;
@@ -519,16 +620,38 @@ function receiptDetailHtml(id, d) {
 
 // Composant liste de reçus cliquables, réutilisé (Dashboard + listes filtrées).
 function receiptRowHtml(r) {
-  return `<tr class="receipt-open" data-id="${r.receipt_id}" title="Voir le détail du reçu">
+  const st = receiptStatus(r);
+  return `<tr class="receipt-open ${st.rowClass}" data-id="${r.receipt_id}" data-status="${st.status}" title="Voir le détail du reçu">
     <td><b>#${r.receipt_id}</b></td><td>${esc(r.category || '—')}</td>
     <td class="num">${r.n_items}</td><td class="num">${money(r.total)}</td>
-    <td>${r.anomaly ? '⚠️ à revoir' : '✅'}</td></tr>`;
+    <td>${st.badge}</td></tr>`;
 }
-function receiptsListCard(receipts, title) {
+function receiptFilterBar(receipts) {
+  const total = receipts.length;
+  const review = receipts.filter(r => receiptStatus(r).status === 'review').length;
+  return `<div class="filter-bar" id="receipt-filters">
+    <button class="btn filter-btn active" data-filter="all">Tous (${total})</button>
+    <button class="btn filter-btn" data-filter="conforme">✓ Conformes (${total - review})</button>
+    <button class="btn filter-btn" data-filter="review">⚠️ À vérifier (${review})</button></div>`;
+}
+// Filtre la liste des reçus SANS re-render (préserve la délégation d'événement).
+function applyReceiptFilter(filter) {
+  $$('#receipt-filters .filter-btn').forEach(b => b.classList.toggle('active', b.dataset.filter === filter));
+  $$('#dash-receipts tbody tr.receipt-open').forEach(tr => {
+    const st = tr.dataset.status;
+    const show = filter === 'all' || (filter === 'review' ? st === 'review' : st !== 'review');
+    tr.classList.toggle('row-hidden', !show);
+  });
+}
+function receiptsListCard(receipts, title, opts) {
   if (!receipts || !receipts.length) return '';
-  return `<div class="card">
+  opts = opts || {};
+  const idAttr = opts.id ? ` id="${opts.id}"` : '';
+  const filters = opts.filters ? receiptFilterBar(receipts) : '';
+  return `<div class="card"${idAttr}>
     <div class="section-head"><span class="label-caps">${esc(title)} (${receipts.length})</span>
       <span class="muted body-sm">Cliquez une ligne pour voir le détail</span></div>
+    ${filters}
     <table><thead><tr><th>Reçu</th><th>Catégorie</th><th class="num">Articles</th>
       <th class="num">Total</th><th>Contrôle</th></tr></thead>
       <tbody>${receipts.map(receiptRowHtml).join('')}</tbody></table></div>`;
@@ -547,25 +670,28 @@ function emptyDashboard() {
   const zero = (lbl) => `<div class="kpi kpi--muted"><div class="label-caps">${lbl}</div><div class="value">0</div></div>`;
   return `
     <div class="kpi-grid">
-      ${zero('Reçus analysés')}${zero('Articles')}${zero('Dépense totale')}${zero('Anomalies')}
+      ${zero('Reçus analysés')}${zero('Articles')}${zero('Dépense totale')}${zero('À vérifier')}
     </div>
     <div class="card"><div class="empty-state">
-      <div class="empty-icon">📭</div>
-      <p class="headline-sm">Aucun reçu analysé pour l'instant</p>
-      <p class="muted">Vos dépenses apparaîtront ici une fois un reçu analysé et validé.</p>
+      <div class="empty-icon">👋</div>
+      <p class="headline-sm">Bienvenue !</p>
+      <p class="muted">Commencez par analyser un reçu, ou explorez l'application avec les données de démonstration.</p>
       <div class="btn-row" style="justify-content:center;margin-top:var(--md)">
         <button class="btn btn--primary" id="empty-analyze">📷 Analyser un reçu</button>
+        <button class="btn" id="empty-demo">🔬 Mode démo</button>
       </div>
-      <p class="muted body-sm" style="margin-top:var(--md)">
-        💡 Pour une démonstration sans déposer 50 reçus : activez
-        <b>« Charger les données de démonstration »</b> dans ⚙️ Réglages.
-      </p>
     </div></div>`;
 }
 
 function wireEmptyState() {
   const b = $('#empty-analyze');
   if (b) b.onclick = () => { const t = $('#nav button[data-tab="analyze"]'); switchTab('analyze', t); };
+  const dm = $('#empty-demo');
+  if (dm) dm.onclick = async () => {
+    try { await API.setDemo(true); } catch (e) { /* ignore */ }
+    await refreshSession();
+    loadDashboard();
+  };
 }
 
 /* ==========================================================================
@@ -597,8 +723,12 @@ async function renderAccounting() {
       return;
     }
     const v = d.vat, rep = d.report;
-    const reasons = Object.entries(v.non_recoverable_reasons || {}).map(([r, det]) =>
-      `<div class="body-sm reason-link" data-reason="${esc(r)}" title="Voir les reçus concernés">• ${esc(r)} : ${det.count} reçu(s), ${money(det.amount)} →</div>`).join('');
+    const reasons = Object.entries(v.non_recoverable_reasons || {}).map(([r, det]) => {
+      const text = /fournisseur/i.test(r)
+        ? `${det.count} reçus — TVA non récupérable : le nom du fournisseur n'apparaît pas sur ces reçus, ce qui empêche la déduction fiscale de la TVA. Pour récupérer la TVA, demandez une facture nominative au fournisseur.`
+        : `${esc(r)} : ${det.count} reçu(s), ${money(det.amount)}`;
+      return `<div class="body-sm reason-link" data-reason="${esc(r)}" title="Voir les reçus concernés">• ${text} →</div>`;
+    }).join('');
 
     const vatCard = `<div class="card"><div class="section-head"><span class="label-caps">TVA — ${esc(d.period)}</span></div>
       <div class="section-body grid-2">
@@ -624,8 +754,9 @@ async function renderAccounting() {
         <tbody>${rows}</tbody></table>
       ${d.journal.length > 100 ? `<div class="section-body muted body-sm">Affichage des 100 premiers reçus sur ${d.journal.length}.</div>` : ''}</div>`;
 
-    const disclaimer = `<p class="muted body-sm">ℹ️ ${esc(d.disclaimer)}</p>`;
-    body.innerHTML = vatCard + reportCard + journalCard + disclaimer;
+    // Disclaimer remonté en tête, visible sans scroller (Tâche 4).
+    const disclaimer = `<div class="banner">ℹ️ ${esc(d.disclaimer)}</div>`;
+    body.innerHTML = disclaimer + vatCard + reportCard + journalCard;
     $('#export-journal').onclick = () => exportJournalCsv(d.journal);
     // Groupes de journal cliquables -> détail (retour = comptabilité).
     wireReceiptOpen(body, renderAccounting);
@@ -672,8 +803,8 @@ function setupAsk() {
   $('#ask-input').onkeydown = e => { if (e.key === 'Enter') doAsk(); };
   // Session vide (hors démo) : prévenir que la recherche portera sur le corpus.
   if (state.sessionEmpty && !state.demoMode) {
-    $('#ask-body').innerHTML = `<div class="banner">🔬 Vous n'avez pas encore de dépenses : la recherche portera sur le
-      <b>corpus de référence CORD</b> (ce ne sont pas vos dépenses). Analysez un reçu pour interroger les vôtres.</div>`;
+    $('#ask-body').innerHTML = `<div class="banner">🔬 Vous n'avez pas encore de reçus personnels. La recherche porte sur le
+      <b>corpus de référence CORD</b> (800 reçus indonésiens). Analysez vos propres reçus dans l'onglet Analyser pour interroger VOS dépenses.</div>`;
   }
 }
 

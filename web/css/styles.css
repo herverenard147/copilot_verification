@@ -139,6 +139,26 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--p
 .chip--bad { background: var(--error-container); color: var(--on-error-container); }
 .chip--neutral { background: var(--neutral-bg); color: var(--neutral); }
 
+/* Contrôle expliqué : chip + ligne d'explication VISIBLE (pas un tooltip) */
+.control { margin-bottom: var(--sm); }
+.control-explain { font-size: 12px; color: var(--on-surface-variant); margin: 3px 0 0 2px; line-height: 1.4; }
+.control-explain--bad { color: #7a5b00; }   /* attention (ambre foncé), jamais rouge alarmant */
+
+/* Badges d'état d'un reçu — progressif, jamais alarmiste (Tâche 2) */
+.badge--verified { background: var(--success-bg); color: var(--tertiary); }
+.badge--review { background: var(--warning-container); color: #6b4e00; }
+.badge--nodata { background: var(--neutral-bg); color: var(--neutral); }
+
+/* Marqueur "à vérifier" au niveau du reçu : bordure gauche AMBRE subtile,
+   jamais de fond rouge (le rouge reste sur le chip individuel qui échoue) */
+.receipt-review { box-shadow: inset 3px 0 0 var(--warning); }
+tr.receipt-review > td:first-child { box-shadow: inset 3px 0 0 var(--warning); }
+
+/* Boutons-filtres du dashboard (Tâche 3) */
+.filter-bar { display: flex; gap: var(--sm); flex-wrap: wrap; margin: var(--sm) 0; }
+.filter-btn.active { background: var(--primary-container); color: var(--on-primary); border-color: var(--primary-container); }
+.row-hidden { display: none; }
+
 /* Tag ambre "à vérifier" (qualifie un CHAMP, jamais un pourcentage) */
 .tag-verify {
   background: var(--warning-container); color: #6b4e00;
@@ -193,8 +213,8 @@ tbody tr { border-bottom: 1px solid var(--outline-variant); }
 tbody tr:hover { background: var(--surface-low); }
 td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 tfoot td { font-weight: 700; background: var(--surface-low); }
-tr.unbalanced { background: var(--error-container); }
-tr.unbalanced:hover { background: #ffcfc9; }
+/* Écriture non équilibrée : signalée en AMBRE (à vérifier), plus de fond rouge */
+tr.unbalanced > td:first-child { box-shadow: inset 3px 0 0 var(--warning); }
 
 /* KPI --------------------------------------------------------------------- */
 .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--gutter); }

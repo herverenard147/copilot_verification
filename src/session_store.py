@@ -42,6 +42,14 @@ def _nan(value):
     return None if value is None or (isinstance(value, float) and math.isnan(value)) else value
 
 
+def _flag(value):
+    """Drapeau de controle -> True / False / None (gere le NaN pandas et numpy).
+    Pur formatage d'affichage : aucun calcul, aucun seuil modifie."""
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return None
+    return bool(value)
+
+
 def _is_false(value):
     return value is False or value == False  # noqa: E712  (couvre numpy.bool_)
 
@@ -163,6 +171,11 @@ class UserSession:
             "total": _nan(r.get("total")),
             "n_items": int(r.get("n_items") or 0),
             "anomaly": bool(r.get("anomaly")) if r.get("anomaly") is not None else False,
+            # drapeaux de controle EXPOSES pour l'affichage (badge "N points a
+            # verifier") -- pur formatage, aucun calcul ni seuil touche.
+            "line_sum_ok": _flag(r.get("line_sum_ok")),
+            "total_ok": _flag(r.get("total_ok")),
+            "tax_ok": _flag(r.get("tax_ok")),
         } for r in self.receipts]
 
         return {"empty": False, "kpis": kpis, "by_category": by_category,
@@ -207,6 +220,9 @@ class UserSession:
                 "receipt_id": rid, "category": _nan(row.get("category")),
                 "total": _nan(row.get("total")), "n_items": int(row.get("n_items") or 0),
                 "anomaly": bool(row.get("anomaly")) if row.get("anomaly") is not None else False,
+                "line_sum_ok": _flag(row.get("line_sum_ok")),
+                "total_ok": _flag(row.get("total_ok")),
+                "tax_ok": _flag(row.get("tax_ok")),
                 "vat_reason": reason,
             })
             try:
