@@ -4,8 +4,13 @@ from src.data_loader import merge_blocks
 
 
 def get_amount(gt_parse, block, key):
-    """Extrait un montant d'un JSON CORD-like. Ex: ('total','total_price')."""
-    if not isinstance(gt_parse, dict):
+    """Extrait un montant d'un JSON CORD-like. Ex: ('total','total_price').
+
+    Meme normalisation defensive que Receipt.from_gt_parse (bug E8) : une
+    sortie modele peut etre une liste a la racine, ou autre chose."""
+    if isinstance(gt_parse, list):
+        gt_parse = merge_blocks(gt_parse)
+    elif not isinstance(gt_parse, dict):
         return None
     d = merge_blocks(gt_parse.get(block))
     vals = ensure_list(d.get(key))

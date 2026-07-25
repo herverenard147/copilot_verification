@@ -33,6 +33,8 @@ def build_expense_db(split, limit=None):
 def receipt_text(gt_full):
     """Reconstruit le texte brut d'un recu depuis valid_line.
     C'est l'entree du prompting zero-shot (marchand, date)."""
+    if not isinstance(gt_full, dict):     # normalisation defensive (bug E8)
+        return ""
     words = []
     for line in gt_full.get("valid_line", []):
         words.extend(w["text"] for w in line.get("words", []))

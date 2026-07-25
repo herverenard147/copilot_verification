@@ -1,4 +1,9 @@
-# Interface
+# Interface web (front HTML/CSS/JS servi par FastAPI)
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9        # upload d'images (POST /api/extract)
+
+# Interface technique de secours (Streamlit, non maintenue mais conservee)
 streamlit>=1.32
 
 # Donut (extraction image -> JSON)
@@ -24,8 +29,9 @@ faiss-cpu>=1.7
 groq>=0.9
 google-genai>=0.3
 
-# Images
+# Images + pretraitement (redressement, CLAHE)
 Pillow>=10.0
+opencv-python-headless>=4.9    # CLAHE + detection des bords (src/preprocess.py)
 
 # Tests
 pytest>=8.0
