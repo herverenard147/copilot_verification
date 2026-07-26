@@ -31,7 +31,7 @@ from src.receipt import Receipt, filter_invoice_headers, find_invoice_number
 from src.rules import audit, TAX_RATES
 from src.accounting import (
     journal_entry, is_balanced, vat_recoverable, vat_summary, expense_report,
-    DISCLAIMER, CHART_OF_ACCOUNTS, PAYMENT_ACCOUNTS,
+    apply_account_overrides, DISCLAIMER, CHART_OF_ACCOUNTS, PAYMENT_ACCOUNTS, CHARGE_ACCOUNTS,
 )
 from src.preprocess import preprocess_image, resolution_info
 from src.extractor import extract
@@ -251,13 +251,27 @@ def _nan(value):
     return None if value is None or (isinstance(value, float) and math.isnan(value)) else value
 
 
-def build_receipt_bundle(receipt, country, payment_mode, merchant, category=None):
+def _merge_overrides(payload):
+    """Fusionne l'ancien champ `account` (selecteur unique historique) dans le
+    nouveau dict `account_overrides` (surcharge par ligne, Tache 4). L'ancien
+    devient la surcharge de la ligne de charge 0."""
+    overrides = dict(payload.account_overrides or {})
+    if getattr(payload, "account", None) and "0" not in overrides:
+        overrides["0"] = payload.account
+    return overrides or None
+
+
+def build_receipt_bundle(receipt, country, payment_mode, merchant, category=None,
+                         account_overrides=None):
     """audit + ecriture + TVA a partir d'un Receipt. Coeur partage par
-    /api/extract et /api/validate."""
+    /api/extract, /api/validate et PUT /api/receipt."""
     flags = audit(receipt, country=country)
     try:
         entry = journal_entry(receipt, category=category, payment_mode=payment_mode,
                               country=country, merchant=merchant)
+        # surcharge manuelle des comptes de charge (Tache 4) : compte seul,
+        # montant inchange -> equilibre preserve.
+        apply_account_overrides(entry, account_overrides)
     except (ValueError, KeyError):
         entry = None
     # journal_entry renvoie [] pour un recu vide : on l'expose comme None pour
@@ -403,6 +417,7 @@ class ValidatePayload(BaseModel):
     payment_mode: str = "cash"
     doc_type: str = "ticket"            # 'ticket' ou 'facture' (contexte du recu)
     invoice_number: str | None = None   # numero de facture trouve a l'extraction
+    account_overrides: dict | None = None  # {index_ligne_charge: compte} surcharge manuelle
     persist: bool = True
 
 
@@ -421,17 +436,11 @@ def api_validate(payload: ValidatePayload, request: Request):
         })
     receipt = Receipt(items=items, subtotal=payload.subtotal, tax=payload.tax,
                       total=payload.total)
+    overrides = _merge_overrides(payload)
     bundle = build_receipt_bundle(receipt, payload.country, payload.payment_mode,
-                                  _nan(payload.merchant), category=payload.category)
-
-    # compte reassigne manuellement : on remplace le compte de la ligne de charge
-    # sans toucher aux montants (l'ecriture reste equilibree).
-    if payload.account and bundle["journal"] and bundle["journal"][0]["account"] != payload.account:
-        merchant_label = _nan(payload.merchant) or "fournisseur non identifié"
-        label_account = CHART_OF_ACCOUNTS.get(payload.account, "Charge")
-        bundle["journal"][0]["account"] = payload.account
-        bundle["journal"][0]["label"] = f"{label_account} — {merchant_label}"
-
+                                  _nan(payload.merchant), category=payload.category,
+                                  account_overrides=overrides)
+    bundle["account_overrides"] = overrides
     bundle["persisted"] = False
 
     # Persistance = ajout aux depenses de CETTE session (memoire seule, jamais
@@ -440,7 +449,8 @@ def api_validate(payload: ValidatePayload, request: Request):
         session = _session(request)
         new_id = session.add_receipt(receipt, payload.category, bundle["audit"],
                                      merchant=_nan(payload.merchant), doc_type=payload.doc_type,
-                                     invoice_number=_nan(payload.invoice_number))
+                                     invoice_number=_nan(payload.invoice_number),
+                                     account_overrides=overrides)
         bundle["persisted"] = True
         bundle["receipt_id"] = new_id
         bundle["demo_mode"] = session.demo_mode
@@ -482,14 +492,56 @@ def api_receipt(receipt_id: int, request: Request, country: str = "ID",
                for it in items],
         subtotal=_nan(row.get("subtotal")), tax=_nan(row.get("tax")),
         total=_nan(row.get("total")), receipt_id=receipt_id)
+    overrides = _nan(row.get("account_overrides"))
     bundle = build_receipt_bundle(receipt, country, payment_mode,
-                                  _nan(row.get("merchant")), category=_nan(row.get("category")))
+                                  _nan(row.get("merchant")), category=_nan(row.get("category")),
+                                  account_overrides=overrides)
     bundle["receipt_id"] = receipt_id
     bundle["category"] = _nan(row.get("category"))
     bundle["doc_type"] = _nan(row.get("doc_type")) or "ticket"
     bundle["invoice_number"] = _nan(row.get("invoice_number"))
+    bundle["account_overrides"] = overrides or {}
     bundle["demo_mode"] = session.demo_mode
     return ok(bundle)
+
+
+@app.put("/api/receipt/{receipt_id}")
+@safe
+def api_receipt_update(receipt_id: int, payload: ValidatePayload, request: Request):
+    """Modifie un recu deja valide (Tache 2). Recalcule audit + ecriture via
+    build_receipt_bundle, puis remplace le recu dans la session."""
+    session = _session(request)
+    row, _ = session.get_receipt(receipt_id)
+    if row is None:
+        return fail("Reçu introuvable.", detail="Ce reçu n'existe pas dans votre session.",
+                    status=404, engine="session", suggestions=["Revenir au tableau de bord"])
+    items = [{"name": it.get("name"), "quantity": it.get("quantity"),
+              "unit_price": it.get("unit_price"), "line_price": it.get("line_price"),
+              "category": it.get("category")} for it in payload.items]
+    receipt = Receipt(items=items, subtotal=payload.subtotal, tax=payload.tax, total=payload.total)
+    overrides = _merge_overrides(payload)
+    bundle = build_receipt_bundle(receipt, payload.country, payload.payment_mode,
+                                  _nan(payload.merchant), category=payload.category,
+                                  account_overrides=overrides)
+    session.update_receipt(receipt_id, receipt, payload.category, bundle["audit"],
+                           merchant=_nan(payload.merchant), doc_type=payload.doc_type,
+                           invoice_number=_nan(payload.invoice_number), account_overrides=overrides)
+    bundle.update({"receipt_id": receipt_id, "category": payload.category,
+                   "doc_type": payload.doc_type, "invoice_number": _nan(payload.invoice_number),
+                   "account_overrides": overrides or {}, "updated": True,
+                   "demo_mode": session.demo_mode})
+    return ok(bundle)
+
+
+@app.delete("/api/receipt/{receipt_id}")
+@safe
+def api_receipt_delete(receipt_id: int, request: Request):
+    """Supprime un recu valide (Tache 2) : disparait de toutes les vues."""
+    session = _session(request)
+    if not session.delete_receipt(receipt_id):
+        return fail("Reçu introuvable.", detail="Ce reçu n'existe pas dans votre session.",
+                    status=404, engine="session", suggestions=["Revenir au tableau de bord"])
+    return ok({"deleted": True, "receipt_id": receipt_id})
 
 
 # ---------------------------------------------------------------------------
@@ -654,6 +706,7 @@ def api_config():
         "countries": {c: TAX_RATES[c] for c in TAX_RATES},
         "payment_modes": list(PAYMENT_ACCOUNTS.keys()),
         "chart_of_accounts": CHART_OF_ACCOUNTS,
+        "charge_accounts": CHARGE_ACCOUNTS,   # comptes de charge modifiables (Tache 4)
         "groq_configured": groq != "none",
         "groq_source": groq,
         "disclaimer": DISCLAIMER,

@@ -46,6 +46,17 @@ const API = {
     return this._json(await fetch('/api/receipt/' + encodeURIComponent(id) + q));
   },
 
+  async updateReceipt(id, payload) {
+    return this._json(await fetch('/api/receipt/' + encodeURIComponent(id), {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }));
+  },
+
+  async deleteReceipt(id) {
+    return this._json(await fetch('/api/receipt/' + encodeURIComponent(id), { method: 'DELETE' }));
+  },
+
   async accounting(period, paymentMode, country) {
     const q = new URLSearchParams({ period, payment_mode: paymentMode, country });
     return this._json(await fetch('/api/accounting?' + q.toString()));

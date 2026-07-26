@@ -120,6 +120,54 @@ def test_facture_numero_conserve_dashboard_et_detail():
     assert det["doc_type"] == "facture" and det["invoice_number"] == "12345"  # détail
 
 
+def test_update_receipt_recalcule_et_visible_partout():
+    sid = {"X-Session-Id": "upd"}
+    v = client.post("/api/validate", json={"items": [{"name": "x", "line_price": 1000}],
+        "subtotal": 1000, "total": 1000, "category": "food", "country": "ID", "persist": True}, headers=sid).json()
+    rid = v["receipt_id"]
+    u = client.put(f"/api/receipt/{rid}", json={"items": [{"name": "x", "line_price": 5000}],
+        "subtotal": 5000, "total": 5000, "category": "food", "country": "ID"}, headers=sid).json()
+    assert u["updated"] is True and u["receipt"]["total"] == 5000
+    assert client.get("/api/dashboard", headers=sid).json()["receipts"][0]["total"] == 5000  # visible
+
+
+def test_delete_receipt_disparait_de_toutes_les_vues():
+    sid = {"X-Session-Id": "del"}
+    v = client.post("/api/validate", json={"items": [{"name": "UNIQUE", "line_price": 1000}],
+        "subtotal": 1000, "total": 1000, "category": "food", "country": "ID", "persist": True}, headers=sid).json()
+    rid = v["receipt_id"]
+    assert client.delete(f"/api/receipt/{rid}", headers=sid).json()["deleted"] is True
+    assert client.get("/api/dashboard", headers=sid).json()["empty"] is True          # dashboard
+    assert client.get("/api/accounting", headers=sid).json()["empty"] is True          # journal/TVA
+    assert client.get(f"/api/receipt/{rid}", headers=sid).json()["success"] is False   # plus de référence
+
+
+def test_delete_receipt_introuvable_404_propre():
+    r = client.delete("/api/receipt/999", headers={"X-Session-Id": "del2"})
+    assert r.status_code != 500 and r.json()["success"] is False
+
+
+def test_account_override_equilibre_manuel_et_persiste():
+    sid = {"X-Session-Id": "ovr"}
+    # food -> compte auto 601 ; on force 605
+    v = client.post("/api/validate", json={"items": [{"name": "x", "line_price": 10000, "category": "food"}],
+        "subtotal": 10000, "total": 10000, "category": "food", "country": "ID",
+        "account_overrides": {"0": "605"}, "persist": True}, headers=sid).json()
+    charge = [l for l in v["journal"] if l["debit"] > 0]
+    assert charge[0]["account"] == "605" and charge[0].get("manual") is True
+    assert v["balanced"] is True                                    # équilibre préservé
+    # persistance : rechargé, garde 605 + drapeau manuel
+    d = client.get(f"/api/receipt/{v['receipt_id']}?country=ID", headers=sid).json()
+    dc = [l for l in d["journal"] if l["debit"] > 0]
+    assert dc[0]["account"] == "605" and dc[0].get("manual") is True
+
+
+def test_mapping_automatique_inchange():
+    """La surcharge par reçu ne modifie PAS le mapping par défaut."""
+    from src.accounting import map_category_to_account
+    assert map_category_to_account("food") == "601"        # comportement par défaut intact
+
+
 def test_extract_image_valide_200(monkeypatch):
     # Donut simule : renvoie un JSON CORD exploitable, sans charger le vrai modele
     monkeypatch.setattr(api, "get_donut", lambda: (None, None, "cpu"))

@@ -28,7 +28,7 @@ import pandas as pd
 from src.receipt import Receipt
 from src.accounting import (
     journal_entry, is_balanced, vat_recoverable, vat_summary, expense_report,
-    DISCLAIMER,
+    apply_account_overrides, DISCLAIMER,
 )
 
 RECEIPT_COLUMNS = ["receipt_id", "n_items", "items_sum", "subtotal", "tax",
@@ -92,29 +92,61 @@ class UserSession:
         _save()   # persiste l'etat vidé (retire cette session du fichier)
 
     # -- ecriture (memoire seule) --------------------------------------------
-    def add_receipt(self, receipt, category, flags, merchant=None, doc_type="ticket",
-                    invoice_number=None):
-        """Ajoute un recu valide a la session. Renvoie son id local."""
-        rid = self._next_id
-        self._next_id += 1
-        for it in receipt.items:
-            self.items.append({
-                "receipt_id": rid, "name": it.get("name"), "quantity": it.get("quantity"),
-                "unit_price": it.get("unit_price"), "line_price": it.get("line_price"),
-                # categorie PAR article si presente, sinon celle du recu (retro-compat)
-                "category": it.get("category") or category,
-            })
-        self.receipts.append({
+    def _item_rows(self, rid, receipt, category):
+        return [{
+            "receipt_id": rid, "name": it.get("name"), "quantity": it.get("quantity"),
+            "unit_price": it.get("unit_price"), "line_price": it.get("line_price"),
+            # categorie PAR article si presente, sinon celle du recu (retro-compat)
+            "category": it.get("category") or category,
+        } for it in receipt.items]
+
+    def _receipt_row(self, rid, receipt, category, flags, merchant, doc_type,
+                     invoice_number, account_overrides):
+        return {
             "receipt_id": rid, "n_items": len(receipt.items),
             "items_sum": receipt.items_sum(), "subtotal": receipt.subtotal,
             "tax": receipt.tax, "total": receipt.total,
             "line_sum_ok": flags["line_sum_ok"], "total_ok": flags["total_ok"],
             "tax_ok": flags["tax_ok"], "anomaly": flags["anomaly"],
             "category": category, "merchant": merchant, "doc_type": doc_type,
-            "invoice_number": invoice_number,
-        })
+            "invoice_number": invoice_number, "account_overrides": account_overrides,
+        }
+
+    def add_receipt(self, receipt, category, flags, merchant=None, doc_type="ticket",
+                    invoice_number=None, account_overrides=None):
+        """Ajoute un recu valide a la session. Renvoie son id local."""
+        rid = self._next_id
+        self._next_id += 1
+        self.items.extend(self._item_rows(rid, receipt, category))
+        self.receipts.append(self._receipt_row(rid, receipt, category, flags, merchant,
+                                               doc_type, invoice_number, account_overrides))
         _save()   # persiste apres chaque reçu validé (si la persistance est active)
         return rid
+
+    def update_receipt(self, receipt_id, receipt, category, flags, merchant=None,
+                       doc_type="ticket", invoice_number=None, account_overrides=None):
+        """Remplace un recu existant (memes id) par des donnees recalculees.
+        Renvoie True si le recu existait, False sinon. Reutilise la meme logique
+        de stockage que add_receipt (aucune duplication)."""
+        rid = int(receipt_id)
+        if not any(int(r["receipt_id"]) == rid for r in self.receipts):
+            return False
+        self.items = [it for it in self.items if int(it["receipt_id"]) != rid]
+        self.items.extend(self._item_rows(rid, receipt, category))
+        new_row = self._receipt_row(rid, receipt, category, flags, merchant, doc_type,
+                                    invoice_number, account_overrides)
+        self.receipts = [new_row if int(r["receipt_id"]) == rid else r for r in self.receipts]
+        _save()
+        return True
+
+    def delete_receipt(self, receipt_id):
+        """Supprime un recu (ligne + articles). Renvoie True si supprime."""
+        rid = int(receipt_id)
+        n = len(self.receipts)
+        self.receipts = [r for r in self.receipts if int(r["receipt_id"]) != rid]
+        self.items = [it for it in self.items if int(it["receipt_id"]) != rid]
+        _save()
+        return len(self.receipts) < n
 
     def load_demo(self, receipts, items):
         """MODE DEMONSTRATION : peuple la session avec un corpus (copie
@@ -237,6 +269,8 @@ class UserSession:
             try:
                 entry = journal_entry(r, category=_nan(row.get("category")),
                                       payment_mode=payment_mode, country=country, merchant=merchant)
+                # surcharge manuelle des comptes (Tache 4) appliquee au journal
+                apply_account_overrides(entry, _nan(row.get("account_overrides")))
                 journal_groups.append({"receipt_id": rid,
                                        "balanced": is_balanced(entry), "lines": entry,
                                        "doc_type": doc_type, "invoice_number": invoice_number})

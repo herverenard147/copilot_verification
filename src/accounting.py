@@ -207,6 +207,36 @@ def journal_entry(receipt, category, payment_mode="cash", country="CI", merchant
     return lines
 
 
+# Comptes de charge modifiables manuellement (les seuls : la contrepartie
+# 571/521/401 et la TVA 4452 restent des consequences automatiques).
+CHARGE_ACCOUNTS = ["601", "605", "6181", "627", "628", "638"]
+
+
+def apply_account_overrides(entry, overrides):
+    """SURCHARGE MANUELLE du compte d'une ligne de charge (Tache 4).
+
+    `overrides` : {index_ligne_de_charge (str): compte}. On ne change QUE le
+    compte, jamais le montant -> l'equilibre debit/credit est preserve
+    mecaniquement (is_balanced reste vrai). Les lignes touchees sont marquees
+    'manual' pour la tracabilite. N'affecte PAS map_category_to_account : c'est
+    une surcharge par recu, pas un changement du comportement par defaut.
+    Modifie et renvoie `entry`."""
+    if not overrides:
+        return entry
+    charge_i = 0
+    for line in entry:
+        if line["debit"] > 0 and line["account"] != "4452":
+            new_account = overrides.get(str(charge_i))
+            if new_account and new_account in CHART_OF_ACCOUNTS and new_account != line["account"]:
+                parts = line["label"].split(" — ", 1)
+                merchant_label = parts[1] if len(parts) > 1 else "fournisseur non identifie"
+                line["account"] = new_account
+                line["label"] = f"{CHART_OF_ACCOUNTS[new_account]} — {merchant_label}"
+                line["manual"] = True
+            charge_i += 1
+    return entry
+
+
 def is_balanced(entry, tolerance=0.01):
     """Seule regle EXACTE du projet : total debits == total credits."""
     total_debit = sum(line["debit"] for line in entry)

@@ -16,6 +16,8 @@ const state = {
   askHistory: [],
   demoMode: false,     // corpus CORD chargé dans la session (bandeau permanent)
   sessionEmpty: true,  // aucune dépense utilisateur pour l'instant
+  editingId: null,     // id du reçu en cours de MODIFICATION (null = nouveau scan)
+  accountOverrides: {},// {index_ligne_charge: compte} surcharges manuelles (Tâche 4)
 };
 
 /* ---------- helpers ---------- */
@@ -246,7 +248,7 @@ function switchTab(tab, btn) {
    ONGLET 1 — ANALYSER
    ========================================================================== */
 function renderAnalyzeEmpty() {
-  state.result = null; state.file = null;
+  state.result = null; state.file = null; state.editingId = null; state.accountOverrides = {};
   $('#analyze-body').innerHTML = `
     <div class="dropzone" id="dropzone">
       <div style="font-size:40px">📤</div>
@@ -290,6 +292,7 @@ function renderLoading() {
 
 async function handleFile(file) {
   state.file = file;
+  state.editingId = null; state.accountOverrides = {};   // nouvel upload = nouveau reçu
   const timer = renderLoading();
   try {
     const data = await API.extract(file, state.country, state.payment, state.docType);
@@ -343,18 +346,26 @@ function renderResult(data) {
        les résultats sur reçus ivoiriens sont dégradés. Les règles comptables SYSCOHADA, elles, restent fonctionnelles.</div>`
     : '';
 
-  const accounts = state.config.chart_of_accounts || {};
-  const proposedAccount = (data.journal && data.journal[0]) ? data.journal[0].account : '638';
+  state.accountOverrides = { ...(data.account_overrides || {}) };   // surcharges connues
+  const editing = state.editingId != null;
+  const invoiceField = data.doc_type === 'facture'
+    ? `<div class="card"><div class="section-body">
+         <label class="field" for="in-invoice">Numéro de facture (modifiable)</label>
+         <input id="in-invoice" type="text" placeholder="ex. 12345" value="${esc(data.invoice_number || '')}" />
+         <p class="muted body-sm" style="margin-top:var(--xs)">Détecté automatiquement — remplacez-le si besoin. Vide → « Facture #{id} ».</p>
+       </div></div>` : '';
 
   $('#analyze-body').innerHTML = `
     ${banner}
     <div style="margin-bottom:var(--md)">${engineBadge(data.engine)}
       ${data.fallback_note ? `<span class="muted body-sm" style="margin-left:var(--sm)">${esc(data.fallback_note)}</span>` : ''}
+      ${editing ? `<span class="badge badge--review" style="margin-left:var(--sm)">✏️ Modification du reçu #${state.editingId}</span>` : ''}
     </div>
     <p class="muted body-sm" style="margin-bottom:var(--md)">💡 Vous pouvez modifier chaque montant dans le tableau. Les contrôles et l'écriture comptable se mettent à jour en temps réel.</p>
     <div class="analyze-grid">
       <div>${imgHtml}</div>
       <div class="stack">
+        ${invoiceField}
         <div class="card">
           <div class="section-head"><span class="label-caps">Articles extraits</span>
             <span id="verify-tag"></span></div>
@@ -377,12 +388,8 @@ function renderResult(data) {
           <div class="section-body" id="chips"></div></div>
 
         <div class="card">
-          <div class="section-head"><span class="label-caps">Écriture comptable proposée</span></div>
-          <div class="section-body">
-            <label class="field">Compte de charge (réassignable)</label>
-            <select id="sel-account">${Object.entries(accounts).map(([code, lbl]) =>
-              `<option value="${code}">${code} — ${esc(lbl)}</option>`).join('')}</select>
-          </div>
+          <div class="section-head"><span class="label-caps">Écriture comptable proposée</span>
+            <span class="muted body-sm">Chaque compte de charge est modifiable</span></div>
           <table><thead><tr><th>Compte</th><th>Libellé</th><th class="num">Débit</th><th class="num">Crédit</th></tr></thead>
             <tbody id="journal-body"></tbody></table>
           <div class="section-body" id="journal-footer"></div>
@@ -391,7 +398,10 @@ function renderResult(data) {
         <details><summary>Voir le JSON brut extrait</summary>
           <pre>${esc(JSON.stringify(data.raw_json || {}, null, 2))}</pre></details>
 
-        <button class="btn btn--primary" id="btn-validate">✅ Valider et enregistrer dans les dépenses</button>
+        <div class="btn-row">
+          <button class="btn btn--primary" id="btn-validate">${editing ? '💾 Enregistrer les modifications' : '✅ Valider et enregistrer dans les dépenses'}</button>
+          <button class="btn" id="btn-cancel">Annuler</button>
+        </div>
       </div>
     </div>`;
 
@@ -400,17 +410,24 @@ function renderResult(data) {
   $('#in-subtotal').value = r.subtotal ?? '';
   $('#in-tax').value = r.tax ?? '';
   $('#in-total').value = r.total ?? '';
-  $('#sel-account').value = proposedAccount;
 
-  // premier rendu des chips / écriture depuis la réponse extract
+  // premier rendu des chips / écriture (avec comptes éditables)
   paintAudit(data.audit, data.journal, data.balanced, data.vat, r, state.country);
   updateVerifyTag(r);
 
   // câblage des recalculs live
   $('#add-item').onclick = () => { addItemRow(); recompute(); };
   ['in-subtotal', 'in-tax', 'in-total'].forEach(id => { $('#' + id).onchange = recompute; });
-  $('#sel-account').onchange = recompute;
   $('#btn-validate').onclick = saveReceipt;
+  $('#btn-cancel').onclick = cancelEdit;
+}
+
+// TÂCHE 1 — Annuler le scan/l'édition en cours : rien n'a été enregistré côté
+// serveur (aucun /api/validate ni PUT n'a eu lieu), on vide juste l'état front.
+function cancelEdit() {
+  state.editingId = null;
+  state.accountOverrides = {};
+  renderAnalyzeEmpty();
 }
 
 function renderItems(items) {
@@ -444,15 +461,17 @@ function readReceiptFromDOM() {
     return row;
   }).filter(r => r.name || r.line_price != null);
   const num = id => { const el = $('#' + id); if (!el || el.value === '') return null; return Number(el.value); };
+  // numéro de facture : saisie manuelle prioritaire, sinon détecté (Tâche 3)
+  const invEl = $('#in-invoice');
+  const invoice = invEl ? (invEl.value.trim() || null) : (state.result?.invoice_number ?? null);
   return {
     items,
     subtotal: num('in-subtotal'), tax: num('in-tax'), total: num('in-total'),
-    account: $('#sel-account') ? $('#sel-account').value : null,
+    account_overrides: state.accountOverrides,                 // surcharges par ligne (Tâche 4)
     merchant: state.result?.receipt?.merchant ?? null,
     country: state.country, payment_mode: state.payment,
-    // conserve le type + le numéro trouvés à l'extraction (contexte du reçu)
     doc_type: state.result?.doc_type ?? state.docType,
-    invoice_number: state.result?.invoice_number ?? null,
+    invoice_number: invoice,
     persist: false,
   };
 }
@@ -480,11 +499,30 @@ function paintAudit(audit, journal, balanced, vat, receipt, country) {
     jf.innerHTML = '';
     return;
   }
-  jb.innerHTML = journal.map(l => `<tr>
-    <td style="color:var(--primary);font-weight:500">${esc(l.account)}</td>
-    <td>${esc(l.label)}</td>
-    <td class="num">${money(l.debit)}</td>
-    <td class="num">${money(l.credit)}</td></tr>`).join('');
+  // Comptes de charge (débit>0, hors 4452) éditables via menu déroulant ;
+  // contreparties (571/521/401, 4452) automatiques -> texte seul (Tâche 4).
+  const charge = state.config.charge_accounts || ['601', '605', '6181', '627', '628', '638'];
+  const labels = state.config.chart_of_accounts || {};
+  let ci = -1;
+  jb.innerHTML = journal.map(l => {
+    const isCharge = l.debit > 0 && l.account !== '4452';
+    let accountCell;
+    if (isCharge) {
+      ci += 1;
+      const opts = charge.map(a => `<option value="${a}"${a === l.account ? ' selected' : ''}>${a} — ${esc(labels[a] || '')}</option>`).join('');
+      accountCell = `<select class="journal-account" data-ci="${ci}">${opts}</select>`
+        + (l.manual ? ` <span class="badge badge--review" title="Compte choisi manuellement">✏️ modifié</span>` : '');
+    } else {
+      accountCell = `<span style="color:var(--primary);font-weight:500">${esc(l.account)}</span>`;
+    }
+    return `<tr><td>${accountCell}</td><td>${esc(l.label)}</td>
+      <td class="num">${money(l.debit)}</td><td class="num">${money(l.credit)}</td></tr>`;
+  }).join('');
+  // changement de compte -> mémorise la surcharge et recalcule (montant inchangé)
+  $$('.journal-account', jb).forEach(sel => sel.onchange = () => {
+    state.accountOverrides[sel.dataset.ci] = sel.value;
+    recompute();
+  });
   const td = journal.reduce((s, l) => s + (l.debit || 0), 0);
   const tc = journal.reduce((s, l) => s + (l.credit || 0), 0);
   const vatNote = (vat && vat.recoverable === 0 && receipt.tax)
@@ -504,13 +542,24 @@ async function saveReceipt() {
   const payload = readReceiptFromDOM();
   payload.persist = true;
   try {
-    const data = await API.validate(payload);
-    if (data.persisted) {
-      toast('✅ Reçu #' + data.receipt_id + ' enregistré dans vos dépenses');
+    if (state.editingId != null) {                    // MODIFICATION d'un reçu existant
+      const id = state.editingId;
+      await API.updateReceipt(id, payload);
+      state.editingId = null;
+      state.accountOverrides = {};
+      toast('💾 Reçu #' + id + ' mis à jour');
       await refreshSession();
-      renderAnalyzeEmpty();
-    } else {
-      toast('Enregistré côté calcul mais non persisté.');
+      const t = $('#nav button[data-tab="dashboard"]');
+      switchTab('dashboard', t);                      // retour au dashboard, recalculé
+    } else {                                          // NOUVEAU reçu
+      const data = await API.validate(payload);
+      if (data.persisted) {
+        toast('✅ Reçu #' + data.receipt_id + ' enregistré dans vos dépenses');
+        await refreshSession();
+        renderAnalyzeEmpty();
+      } else {
+        toast('Enregistré côté calcul mais non persisté.');
+      }
     }
   } catch (e) {
     toast('Enregistrement impossible : ' + e.message);
@@ -607,6 +656,46 @@ async function openReceiptDetail(id, container, restore) {
   }
   const b = container.querySelector('#detail-back');
   if (b) b.onclick = restore;
+  // Tâche 2 : modifier / supprimer un reçu déjà validé (démo exclue : lecture seule).
+  const ed = container.querySelector('#detail-edit'), del = container.querySelector('#detail-delete');
+  if (state.demoMode) {                               // corpus de démo : pas d'édition
+    if (ed) ed.remove();
+    if (del) del.remove();
+  } else {
+    if (ed) ed.onclick = () => editReceipt(id);
+    if (del) del.onclick = () => deleteReceipt(id, restore);
+  }
+}
+
+// TÂCHE 2 — "Modifier" : recharge le reçu dans l'éditeur d'analyse en mode
+// édition (réutilise renderResult ; la sauvegarde fera un PUT au lieu d'un POST).
+async function editReceipt(id) {
+  try {
+    const country = state.country;
+    const d = await API.receipt(id, country);
+    state.editingId = id;
+    state.file = null;
+    state.result = d;
+    const t = $('#nav button[data-tab="analyze"]');
+    switchTab('analyze', t);
+    renderResult(d);
+  } catch (e) {
+    toast('Ouverture impossible : ' + e.message);
+  }
+}
+
+// TÂCHE 2 — "Supprimer" avec confirmation (pas de suppression en un clic).
+async function deleteReceipt(id, restore) {
+  if (!window.confirm('Supprimer définitivement le reçu #' + id + ' ? Cette action est irréversible.')) return;
+  try {
+    await API.deleteReceipt(id);
+    toast('🗑️ Reçu #' + id + ' supprimé');
+    await refreshSession();
+    if (typeof restore === 'function') restore();     // recharge la vue d'origine (sans le reçu)
+    else loadDashboard();
+  } catch (e) {
+    toast('Suppression impossible : ' + e.message);
+  }
 }
 
 // Détail (réutilise controlsHtml() et money() ; bundle serveur = build_receipt_bundle).
@@ -619,13 +708,15 @@ function receiptDetailHtml(id, d, country) {
   const controls = controlsHtml(a, d.balanced, r, d.journal, country);
   const encart = reviewBanner(reviewPoints(a, d.balanced, r), false);
   const journal = d.journal ? d.journal.map(l => `<tr>
-    <td style="color:var(--primary);font-weight:500">${esc(l.account)}</td>
+    <td style="color:var(--primary);font-weight:500">${esc(l.account)}${l.manual ? ' <span class="badge badge--review" title="Compte choisi manuellement">✏️ modifié</span>' : ''}</td>
     <td>${esc(l.label)}</td><td class="num">${money(l.debit)}</td>
     <td class="num">${money(l.credit)}</td></tr>`).join('')
     : `<tr><td colspan="4" class="muted">Écriture impossible : montants insuffisants.</td></tr>`;
   return `
     <div class="btn-row" style="margin-bottom:var(--md)">
-      <button class="btn" id="detail-back">← Retour</button></div>
+      <button class="btn" id="detail-back">← Retour</button>
+      <button class="btn" id="detail-edit">✏️ Modifier</button>
+      <button class="btn" id="detail-delete">🗑️ Supprimer</button></div>
     ${encart}
     <div class="card"><div class="section-head">
       <span class="label-caps">${receiptLabel({ doc_type: d.doc_type, invoice_number: d.invoice_number, receipt_id: id })}${d.category ? ' — ' + esc(d.category) : ''}</span></div>
