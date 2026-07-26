@@ -92,7 +92,7 @@ class UserSession:
         _save()   # persiste l'etat vidé (retire cette session du fichier)
 
     # -- ecriture (memoire seule) --------------------------------------------
-    def add_receipt(self, receipt, category, flags, merchant=None):
+    def add_receipt(self, receipt, category, flags, merchant=None, doc_type="ticket"):
         """Ajoute un recu valide a la session. Renvoie son id local."""
         rid = self._next_id
         self._next_id += 1
@@ -109,7 +109,7 @@ class UserSession:
             "tax": receipt.tax, "total": receipt.total,
             "line_sum_ok": flags["line_sum_ok"], "total_ok": flags["total_ok"],
             "tax_ok": flags["tax_ok"], "anomaly": flags["anomaly"],
-            "category": category, "merchant": merchant,
+            "category": category, "merchant": merchant, "doc_type": doc_type,
         })
         _save()   # persiste apres chaque reçu validé (si la persistance est active)
         return rid

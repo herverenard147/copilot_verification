@@ -52,6 +52,42 @@ def png_bytes(size=(700, 500)):
     return buf.getvalue()
 
 
+# Menu Donut RÉEL sur la facture française (test_images/06_facture_francaise_design.webp)
+_FACTURE_MENU = {"menu": [
+    {"nm": "Facture n 12345"}, {"nm": "CELIA NAUDIN"}, {"nm": "hello@reallygreatsite.com"},
+    {"nm": "123 Anywhere St., Any City DESCRIPTION PRX", "price": "900"},
+    {"nm": "Creation de logo", "price": "900"}, {"nm": "Conception d'un flyer", "price": "300"},
+    {"nm": "Carte de visite", "price": "900"}, {"nm": "Illustration personalisee", "price": "1500"},
+    {"nm": "Banniere publicitaire", "price": "250"},
+]}
+
+
+def test_extract_mode_facture_filtre_les_entetes(monkeypatch):
+    monkeypatch.setattr(api, "get_donut", lambda: (None, None, "cpu"))
+    monkeypatch.setattr(api, "extract", lambda *a, **k: _FACTURE_MENU)
+    r = client.post("/api/extract", files={"file": ("f.png", png_bytes(), "image/png")},
+                    data={"country": "ID", "doc_type": "facture"}, headers={"X-Session-Id": "fac"})
+    assert r.status_code == 200
+    body = r.json()
+    names = [it["name"] for it in body["receipt"]["items"]]
+    assert "CELIA NAUDIN" not in names and "hello@reallygreatsite.com" not in names
+    assert "Facture n 12345" not in names
+    assert "Creation de logo" in names            # vrais articles conservés
+    assert body["doc_type"] == "facture"
+
+
+def test_extract_mode_ticket_ne_change_rien(monkeypatch):
+    """Mode ticket = comportement identique à avant : aucun item retiré."""
+    monkeypatch.setattr(api, "get_donut", lambda: (None, None, "cpu"))
+    monkeypatch.setattr(api, "extract", lambda *a, **k: _FACTURE_MENU)
+    r = client.post("/api/extract", files={"file": ("f.png", png_bytes(), "image/png")},
+                    data={"country": "ID", "doc_type": "ticket"}, headers={"X-Session-Id": "tic"})
+    body = r.json()
+    names = [it["name"] for it in body["receipt"]["items"]]
+    assert "CELIA NAUDIN" in names and len(names) == 9   # TOUS conservés
+    assert body["doc_type"] == "ticket"
+
+
 def test_extract_image_valide_200(monkeypatch):
     # Donut simule : renvoie un JSON CORD exploitable, sans charger le vrai modele
     monkeypatch.setattr(api, "get_donut", lambda: (None, None, "cpu"))

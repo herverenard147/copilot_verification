@@ -1,7 +1,48 @@
 """Tests des regles metier. Lancer avec : pytest tests/ -q"""
-from src.receipt import Receipt
+from src.receipt import Receipt, filter_invoice_headers
 from src.rules import check_line_sum, check_total, check_tax_rate, check_magnitude, audit
 from src.accounting import journal_entry, is_balanced
+
+
+# --- Post-traitement FACTURE : filtre des lignes d'en-tete (mode facture) ---
+
+# Sortie Donut RÉELLE sur test_images/06_facture_francaise_design.webp (9 lignes).
+_FACTURE_ITEMS = [
+    {"name": "Facture n 12345", "quantity": None, "unit_price": None, "line_price": None},
+    {"name": "CELIA NAUDIN", "quantity": None, "unit_price": None, "line_price": None},
+    {"name": "hello@reallygreatsite.com", "quantity": None, "unit_price": None, "line_price": None},
+    {"name": "123 Anywhere St., Any City DESCRIPTION PRX", "quantity": None, "unit_price": None, "line_price": 900.0},
+    {"name": "Creation de logo", "quantity": None, "unit_price": None, "line_price": 900.0},
+    {"name": "Conception d'un flyer", "quantity": None, "unit_price": None, "line_price": 300.0},
+    {"name": "Carte de visite", "quantity": None, "unit_price": None, "line_price": 900.0},
+    {"name": "Illustration personalisee", "quantity": None, "unit_price": None, "line_price": 1500.0},
+    {"name": "Banniere publicitaire", "quantity": None, "unit_price": None, "line_price": 250.0},
+]
+
+
+def test_filter_facture_retire_entetes_sans_montant():
+    kept = filter_invoice_headers(_FACTURE_ITEMS)
+    names = [it["name"] for it in kept]
+    # en-têtes du 1er tiers SANS montant -> retirés
+    assert "CELIA NAUDIN" not in names
+    assert "hello@reallygreatsite.com" not in names
+    assert "Facture n 12345" not in names
+    # les vrais articles (avec prix) restent
+    for art in ["Creation de logo", "Conception d'un flyer", "Carte de visite",
+                "Illustration personalisee", "Banniere publicitaire"]:
+        assert art in names
+    assert len(kept) == 6   # 3 en-têtes sans montant retirés sur 9
+
+
+def test_filter_ticket_avec_prix_ne_retire_rien():
+    """Un ticket normal (articles avec prix) n'est jamais amputé, même si la
+    fonction est appelée : tout item du 1er tiers a un montant -> conservé."""
+    items = [{"name": f"a{i}", "quantity": 1, "unit_price": 1000, "line_price": 1000} for i in range(5)]
+    assert filter_invoice_headers(items) == items
+
+
+def test_filter_liste_vide_ne_plante_pas():
+    assert filter_invoice_headers([]) == []
 
 
 def make(prices, subtotal, tax, total):

@@ -27,7 +27,7 @@ from pydantic import BaseModel
 
 logger = logging.getLogger("copilote.api")
 
-from src.receipt import Receipt
+from src.receipt import Receipt, filter_invoice_headers
 from src.rules import audit, TAX_RATES
 from src.accounting import (
     journal_entry, is_balanced, vat_recoverable, vat_summary, expense_report,
@@ -287,7 +287,8 @@ def build_receipt_bundle(receipt, country, payment_mode, merchant, category=None
 @app.post("/api/extract")
 @safe
 def api_extract(file: UploadFile = File(...), country: str = Form("ID"),
-                payment_mode: str = Form("cash"), merchant: str = Form(None)):
+                payment_mode: str = Form("cash"), merchant: str = Form(None),
+                doc_type: str = Form("ticket")):
     try:
         raw = file.file.read()
     except Exception:
@@ -362,6 +363,12 @@ def api_extract(file: UploadFile = File(...), country: str = Form("ID"),
     elif want_fallback:
         fallback_note = "Fallback vision non tenté : aucune clé Groq configurée."
 
+    # Post-traitement FACTURE (regles simples) : retire les lignes d'en-tete
+    # (nom/adresse/email captes comme 'articles' sans montant, en tete de liste).
+    # Le mode 'ticket' ne touche a rien -> comportement identique a avant.
+    if doc_type == "facture":
+        receipt.items = filter_invoice_headers(receipt.items)
+
     bundle = build_receipt_bundle(receipt, country, payment_mode, _nan(merchant))
     bundle.update({
         "engine": engine,
@@ -370,6 +377,7 @@ def api_extract(file: UploadFile = File(...), country: str = Form("ID"),
         "preprocess": pre_info,
         "country": country,
         "payment_mode": payment_mode,
+        "doc_type": doc_type,
     })
     return ok(bundle)
 
@@ -387,6 +395,7 @@ class ValidatePayload(BaseModel):
     merchant: str | None = None
     country: str = "ID"                 # defaut ID : le corpus CORD est indonesien
     payment_mode: str = "cash"
+    doc_type: str = "ticket"            # 'ticket' ou 'facture' (contexte du recu)
     persist: bool = True
 
 
@@ -423,10 +432,11 @@ def api_validate(payload: ValidatePayload, request: Request):
     if payload.persist:
         session = _session(request)
         new_id = session.add_receipt(receipt, payload.category, bundle["audit"],
-                                     merchant=_nan(payload.merchant))
+                                     merchant=_nan(payload.merchant), doc_type=payload.doc_type)
         bundle["persisted"] = True
         bundle["receipt_id"] = new_id
         bundle["demo_mode"] = session.demo_mode
+    bundle["doc_type"] = payload.doc_type
     return ok(bundle)
 
 
@@ -467,6 +477,7 @@ def api_receipt(receipt_id: int, request: Request, country: str = "ID",
                                   _nan(row.get("merchant")), category=_nan(row.get("category")))
     bundle["receipt_id"] = receipt_id
     bundle["category"] = _nan(row.get("category"))
+    bundle["doc_type"] = _nan(row.get("doc_type")) or "ticket"
     bundle["demo_mode"] = session.demo_mode
     return ok(bundle)
 

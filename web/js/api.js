@@ -20,11 +20,12 @@ const API = {
     return this._json(await fetch('/api/config'));
   },
 
-  async extract(file, country, paymentMode) {
+  async extract(file, country, paymentMode, docType) {
     const form = new FormData();
     form.append('file', file);
     form.append('country', country);
     form.append('payment_mode', paymentMode);
+    form.append('doc_type', docType || 'ticket');
     return this._json(await fetch('/api/extract', { method: 'POST', body: form }));
   },
 

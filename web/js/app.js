@@ -10,6 +10,7 @@ const state = {
   config: null,
   country: 'CI',
   payment: 'cash',
+  docType: 'ticket',   // 'ticket' (défaut, inchangé) ou 'facture' (post-traitement en-têtes)
   file: null,          // File courant (pour l'aperçu image)
   result: null,        // dernier /api/extract
   askHistory: [],
@@ -203,6 +204,12 @@ function populateSelects() {
     .map(k => `<option value="${k}">${esc(paymentLabels[k] || k)}</option>`).join('');
   p.value = state.payment;
   p.onchange = () => { state.payment = p.value; if (state.result) recompute(); };
+
+  // Type de document : n'agit qu'au moment de l'extraction (post-traitement
+  // en-têtes en mode facture). Changer le sélecteur ne re-filtre pas un résultat
+  // déjà affiché — il faut relancer une extraction pour un effet.
+  const dt = $('#sel-doctype');
+  if (dt) { dt.value = state.docType; dt.onchange = () => { state.docType = dt.value; }; }
 }
 
 function wireNav() {
@@ -273,7 +280,7 @@ async function handleFile(file) {
   state.file = file;
   const timer = renderLoading();
   try {
-    const data = await API.extract(file, state.country, state.payment);
+    const data = await API.extract(file, state.country, state.payment, state.docType);
     clearInterval(timer);
     state.result = data;
     renderResult(data);
@@ -430,7 +437,7 @@ function readReceiptFromDOM() {
     subtotal: num('in-subtotal'), tax: num('in-tax'), total: num('in-total'),
     account: $('#sel-account') ? $('#sel-account').value : null,
     merchant: state.result?.receipt?.merchant ?? null,
-    country: state.country, payment_mode: state.payment, persist: false,
+    country: state.country, payment_mode: state.payment, doc_type: state.docType, persist: false,
   };
 }
 

@@ -1,6 +1,31 @@
 """La classe Receipt : UN recu = UN objet, avec ses donnees et ses calculs."""
+import math
+
 from src.utils import clean_amount, ensure_list
 from src.data_loader import merge_blocks
+
+
+def filter_invoice_headers(items):
+    """Post-traitement FACTURE (regles simples, PAS un modele appris).
+
+    Retire les lignes du PREMIER TIERS de la liste extraite qui n'ont NI prix
+    NI quantite. Sur une facture, l'en-tete (nom, adresse, email) est souvent
+    capte comme des 'articles' sans montant. Heuristique volontairement simple :
+    la position dans l'ordre de lecture sert de proxy du tiers vertical (Donut
+    ne fournit aucune coordonnee), combinee a l'absence de montant.
+
+    Le mode 'ticket de caisse' n'appelle JAMAIS cette fonction -> son
+    comportement reste strictement identique. Limite assumee : une ligne
+    d'en-tete a laquelle Donut a mal rattache un prix ne sera pas retiree
+    (elle 'a un montant')."""
+    if not items:
+        return items
+    cutoff = math.ceil(len(items) / 3)      # premier tiers, ordre de lecture
+    return [it for i, it in enumerate(items)
+            if not (i < cutoff
+                    and it.get("line_price") is None
+                    and it.get("unit_price") is None
+                    and it.get("quantity") is None)]
 
 
 class Receipt:
