@@ -328,67 +328,142 @@ def reset_all():
 
 
 # ---------------------------------------------------------------------------
-# Persistance legere HORS DEPOT (jamais data/*.csv). Desactivee par defaut :
-# seul init_persistence() l'active (api.py au demarrage d'un vrai serveur).
+# Persistance legere HORS DEPOT (jamais data/*.csv), via SQLite (stdlib, pas de
+# dependance nouvelle). Desactivee par defaut : seul init_persistence() l'active
+# (api.py au demarrage d'un vrai serveur ; TestClient sans context manager ne
+# declenche pas le lifespan -> aucun .db pendant pytest). Schema minimal : UNE
+# ligne par recu, donnees du recu en JSON dans la colonne `data`.
 # ---------------------------------------------------------------------------
-from pathlib import Path   # noqa: E402  (import local a la persistance)
+import sqlite3            # noqa: E402
+import threading          # noqa: E402
+from datetime import datetime, timezone   # noqa: E402
+from pathlib import Path  # noqa: E402
 
-_state_file = None         # None = persistance desactivee (defaut, tests inclus)
+_db_path = None           # None = persistance desactivee (defaut, tests inclus)
+_conn = None              # connexion SQLite du processus
+_lock = threading.Lock()  # endpoints sync en threadpool -> serialise l'acces base
+
+_SCHEMA = """CREATE TABLE IF NOT EXISTS receipts (
+    session_id     TEXT    NOT NULL,
+    receipt_id     INTEGER NOT NULL,
+    data           TEXT    NOT NULL,   -- {"receipt": {...}, "items": [...]} en JSON
+    doc_type       TEXT,
+    invoice_number TEXT,
+    created_at     TEXT,
+    updated_at     TEXT,
+    PRIMARY KEY (session_id, receipt_id))"""
+
+
+def _open_and_prepare():
+    """Ouvre la base et cree la table. True si OK, False sinon (corrompue…)."""
+    global _conn
+    try:
+        _conn = sqlite3.connect(str(_db_path), check_same_thread=False)
+        _conn.execute(_SCHEMA)
+        _conn.commit()
+        return True
+    except Exception:
+        _conn = None
+        return False
 
 
 def init_persistence(path):
-    """Active la persistance vers `path` (hors depot) et recharge l'etat
-    existant. Idempotent. Fichier absent/corrompu -> etat vide, jamais de crash."""
-    global _state_file
-    _state_file = Path(path)
+    """Active la persistance SQLite vers `path` (hors depot) et recharge l'etat.
+    Base absente -> creee. Corrompue -> recreee a neuf. Verrouillee/illisible ->
+    demarrage a vide. JAMAIS de crash (meme garantie qu'avec le JSON)."""
+    global _db_path
+    if _conn is not None:
+        disable_persistence()          # reouverture propre si deja initialisee
+    _db_path = Path(path)
+    try:
+        _db_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        _db_path = None
+        return
+    if not _open_and_prepare():
+        # corrompue : on repart d'une base neuve (comme le JSON qui ecrasait un
+        # fichier corrompu au prochain save)
+        try:
+            _db_path.unlink()
+        except Exception:
+            pass
+        if not _open_and_prepare():
+            disable_persistence()      # illisible/verrouillee -> etat vide, pas de crash
+            return
     _load()
 
 
 def disable_persistence():
-    """Coupe la persistance (utilise par les tests pour ne rien ecrire)."""
-    global _state_file
-    _state_file = None
+    """Coupe la persistance et ferme la connexion (tests + arret serveur)."""
+    global _db_path, _conn
+    with _lock:
+        if _conn is not None:
+            try:
+                _conn.close()
+            except Exception:
+                pass
+        _db_path, _conn = None, None
+
+
+close_persistence = disable_persistence   # alias explicite pour l'arret du lifespan
 
 
 def _load():
-    """Recharge les sessions depuis le fichier JSON. Tout probleme (absent,
-    corrompu, schema inattendu) -> on repart d'un etat vide, sans exception."""
-    if _state_file is None or not _state_file.exists():
+    """Recharge les sessions depuis la base. Tout probleme -> etat vide."""
+    if _conn is None:
         return
     try:
-        raw = json.loads(_state_file.read_text(encoding="utf-8"))
-        assert isinstance(raw, dict)
+        with _lock:
+            rows = _conn.execute("SELECT session_id, receipt_id, data FROM receipts").fetchall()
     except Exception:
         return
-    for sid, data in raw.items():
+    loaded = {}
+    for sid, _rid, data_json in rows:
         try:
-            session = UserSession(sid, user_id=data.get("user_id"))
-            session.receipts = list(data.get("receipts", []))
-            session.items = list(data.get("items", []))
-            session._next_id = int(data.get("next_id",
-                                             max((int(r["receipt_id"]) for r in session.receipts),
-                                                 default=-1) + 1))
-            # demo_mode volontairement NON restaure (on ne rouvre pas 800 recus CORD)
-            _sessions[sid] = session
+            blob = json.loads(data_json)
+            session = loaded.get(sid) or UserSession(sid)
+            session.receipts.append(blob["receipt"])
+            session.items.extend(blob.get("items", []))
+            loaded[sid] = session
         except Exception:
-            continue   # une session illisible n'empeche pas de charger les autres
+            continue   # une ligne illisible n'empeche pas de charger les autres
+    for sid, session in loaded.items():
+        session._next_id = max((int(r["receipt_id"]) for r in session.receipts), default=-1) + 1
+        # demo_mode volontairement NON restaure (on ne rouvre pas 800 recus CORD)
+        _sessions[sid] = session
 
 
 def _save():
-    """Sauvegarde les sessions NON-DEMO et NON-VIDES. Ecriture atomique.
-    La persistance ne doit JAMAIS casser le service : toute erreur est avalee."""
-    if _state_file is None:
+    """Reecrit l'etat persistable (sessions NON-demo, NON-vides) dans UNE seule
+    transaction (atomique, comme le remplacement de fichier). created_at
+    preserve. La persistance ne doit JAMAIS casser le service : erreurs avalees."""
+    if _conn is None:
         return
+    now = datetime.now(timezone.utc).isoformat()
     try:
-        payload = {}
-        for sid, session in _sessions.items():
-            if session.demo_mode or not session.receipts:
-                continue   # jamais les 800 recus CORD du mode demo, ni les sessions vides
-            payload[sid] = {"user_id": session.user_id, "receipts": session.receipts,
-                            "items": session.items, "next_id": session._next_id}
-        _state_file.parent.mkdir(parents=True, exist_ok=True)
-        tmp = _state_file.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(_state_file)   # remplacement atomique : jamais de fichier a moitie ecrit
+        with _lock:
+            existing = {(sid, rid): cat for sid, rid, cat in
+                        _conn.execute("SELECT session_id, receipt_id, created_at FROM receipts")}
+            cur = _conn.cursor()
+            cur.execute("DELETE FROM receipts")   # transaction implicite jusqu'au commit
+            for sid, session in _sessions.items():
+                if session.demo_mode or not session.receipts:
+                    continue   # jamais le mode demo (800 recus CORD), ni les sessions vides
+                items_by = {}
+                for it in session.items:
+                    items_by.setdefault(int(it["receipt_id"]), []).append(it)
+                for r in session.receipts:
+                    rid = int(r["receipt_id"])
+                    blob = json.dumps({"receipt": r, "items": items_by.get(rid, [])},
+                                      ensure_ascii=False)
+                    created = existing.get((sid, rid), now)
+                    cur.execute(
+                        "INSERT INTO receipts (session_id, receipt_id, data, doc_type, "
+                        "invoice_number, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (sid, rid, blob, r.get("doc_type"), r.get("invoice_number"), created, now))
+            _conn.commit()
     except Exception:
-        pass
+        try:
+            _conn.rollback()
+        except Exception:
+            pass

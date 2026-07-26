@@ -48,13 +48,16 @@ WEB = Path("web")
 # Persistance legere des sessions, HORS DEPOT (jamais data/*.csv). Activee au
 # demarrage d'un vrai serveur uniquement : TestClient (sans context manager)
 # ne declenche pas le lifespan -> aucune I/O disque pendant les tests.
-STATE_FILE = os.environ.get("COPILOTE_STATE_FILE", ".local_state/sessions.json")
+STATE_FILE = os.environ.get("COPILOTE_STATE_FILE", ".local_state/sessions.db")
 
 
 @contextlib.asynccontextmanager
 async def _lifespan(app):
-    session_store.init_persistence(STATE_FILE)   # recharge l'etat s'il existe
-    yield
+    session_store.init_persistence(STATE_FILE)   # ouvre SQLite + recharge l'etat
+    try:
+        yield
+    finally:
+        session_store.close_persistence()        # ferme proprement la connexion
 
 
 app = FastAPI(title="Copilote de reçus — API", lifespan=_lifespan)
