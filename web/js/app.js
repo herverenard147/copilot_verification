@@ -615,7 +615,8 @@ function receiptDetailHtml(id, d, country) {
       <div class="section-body">${controls}</div></div>
     <div class="card"><div class="section-head"><span class="label-caps">Écriture comptable</span></div>
       <table><thead><tr><th>Compte</th><th>Libellé</th><th class="num">Débit</th><th class="num">Crédit</th></tr></thead>
-        <tbody>${journal}</tbody></table></div>`;
+        <tbody>${journal}</tbody></table>
+      <p class="muted body-sm" style="margin:var(--sm) var(--md)">ℹ️ Affectation comptable indicative, à valider par un professionnel (expert-comptable) avant tout usage officiel.</p></div>`;
 }
 
 // Composant liste de reçus cliquables, réutilisé (Dashboard + listes filtrées).
