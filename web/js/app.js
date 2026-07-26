@@ -49,6 +49,15 @@ function receiptLabel(r) {
   return `Reçu #${id}`;
 }
 
+// Image du reçu, disposition unique (analyse ET détail) : fichier local
+// (analyse en direct) OU miniature stockée (base64, détail) OU espace réservé.
+function imageHtml(file, imageData) {
+  const src = file ? URL.createObjectURL(file) : (imageData || null);
+  if (src) return `<img class="receipt-img" src="${src}" alt="Image du reçu" />`;
+  return `<div class="card"><div class="section-body muted" style="text-align:center;padding:var(--xl) var(--md)">
+    <div style="font-size:32px">🧾</div>Image non disponible pour ce reçu</div></div>`;
+}
+
 // chip 3 états : true=✅ / false=❌ / null=➖ (gris NEUTRE, jamais alarmant)
 // Le title explicite chaque état — notamment ➖, souvent mal compris.
 function chip(label, value) {
@@ -337,9 +346,7 @@ function renderError(err) {
 
 function renderResult(data) {
   const r = data.receipt;
-  const imgHtml = state.file
-    ? `<img class="receipt-img" src="${URL.createObjectURL(state.file)}" alt="Reçu déposé" />`
-    : `<div class="card"><div class="section-body muted">Saisie manuelle — aucune image associée.</div></div>`;
+  const imgHtml = imageHtml(state.file, data.image_data);
 
   const banner = state.country === 'CI'
     ? `<div class="banner">⚠️ <b>Mode expérimental</b> : l'extraction est entraînée sur des reçus indonésiens (CORD),
@@ -472,6 +479,7 @@ function readReceiptFromDOM() {
     country: state.country, payment_mode: state.payment,
     doc_type: state.result?.doc_type ?? state.docType,
     invoice_number: invoice,
+    image_data: state.result?.image_data ?? null,   // miniature à stocker/conserver
     persist: false,
   };
 }
@@ -712,25 +720,30 @@ function receiptDetailHtml(id, d, country) {
     <td>${esc(l.label)}</td><td class="num">${money(l.debit)}</td>
     <td class="num">${money(l.credit)}</td></tr>`).join('')
     : `<tr><td colspan="4" class="muted">Écriture impossible : montants insuffisants.</td></tr>`;
+  // Même disposition que l'écran Analyze-result : image à gauche, données à droite.
   return `
     <div class="btn-row" style="margin-bottom:var(--md)">
       <button class="btn" id="detail-back">← Retour</button>
       <button class="btn" id="detail-edit">✏️ Modifier</button>
       <button class="btn" id="detail-delete">🗑️ Supprimer</button></div>
     ${encart}
-    <div class="card"><div class="section-head">
-      <span class="label-caps">${receiptLabel({ doc_type: d.doc_type, invoice_number: d.invoice_number, receipt_id: id })}${d.category ? ' — ' + esc(d.category) : ''}</span></div>
-      <div class="section-body muted body-sm">Reçu enregistré — aucune image conservée (données en mémoire de session).</div></div>
-    <div class="card"><div class="section-head"><span class="label-caps">Articles</span></div>
-      <table><thead><tr><th>Article</th><th class="num">Qté</th><th class="num">Prix unit.</th>
-        <th class="num">Total ligne</th></tr></thead><tbody>${items}</tbody></table>
-      <div class="section-body tabular">Sous-total : ${money(r.subtotal)} · Taxe : ${money(r.tax)} · Total : ${money(r.total)}</div></div>
-    <div class="card"><div class="section-head"><span class="label-caps">Contrôles</span></div>
-      <div class="section-body">${controls}</div></div>
-    <div class="card"><div class="section-head"><span class="label-caps">Écriture comptable</span></div>
-      <table><thead><tr><th>Compte</th><th>Libellé</th><th class="num">Débit</th><th class="num">Crédit</th></tr></thead>
-        <tbody>${journal}</tbody></table>
-      <p class="muted body-sm" style="margin:var(--sm) var(--md)">ℹ️ Affectation comptable indicative, à valider par un professionnel (expert-comptable) avant tout usage officiel.</p></div>`;
+    <div class="analyze-grid">
+      <div>${imageHtml(null, d.image_data)}</div>
+      <div class="stack">
+        <div class="card"><div class="section-head">
+          <span class="label-caps">${receiptLabel({ doc_type: d.doc_type, invoice_number: d.invoice_number, receipt_id: id })}${d.category ? ' — ' + esc(d.category) : ''}</span></div></div>
+        <div class="card"><div class="section-head"><span class="label-caps">Articles</span></div>
+          <table><thead><tr><th>Article</th><th class="num">Qté</th><th class="num">Prix unit.</th>
+            <th class="num">Total ligne</th></tr></thead><tbody>${items}</tbody></table>
+          <div class="section-body tabular">Sous-total : ${money(r.subtotal)} · Taxe : ${money(r.tax)} · Total : ${money(r.total)}</div></div>
+        <div class="card"><div class="section-head"><span class="label-caps">Contrôles</span></div>
+          <div class="section-body">${controls}</div></div>
+        <div class="card"><div class="section-head"><span class="label-caps">Écriture comptable</span></div>
+          <table><thead><tr><th>Compte</th><th>Libellé</th><th class="num">Débit</th><th class="num">Crédit</th></tr></thead>
+            <tbody>${journal}</tbody></table>
+          <p class="muted body-sm" style="margin:var(--sm) var(--md)">ℹ️ Affectation comptable indicative, à valider par un professionnel (expert-comptable) avant tout usage officiel.</p></div>
+      </div>
+    </div>`;
 }
 
 // Composant liste de reçus cliquables, réutilisé (Dashboard + listes filtrées).

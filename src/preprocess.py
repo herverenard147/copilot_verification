@@ -58,6 +58,21 @@ def to_rgb(image):
     return image
 
 
+def image_to_thumbnail_datauri(image, max_width=800, quality=75):
+    """Miniature JPEG (<= max_width de large) en data URI base64, pour AFFICHER
+    le reçu dans la vue détail -- PAS pour l'extraction. Redimensionne pour
+    rester léger (quelques dizaines de Ko), jamais la pleine résolution."""
+    import base64
+    import io
+    img = to_rgb(image)
+    w, h = img.size
+    if w > max_width:
+        img = img.resize((max_width, max(1, round(h * max_width / w))), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=quality)
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+
 def smart_resize(image, target_height=TARGET_HEIGHT):
     """Redimensionne en gardant le RATIO, pour viser ~target_height de haut.
 

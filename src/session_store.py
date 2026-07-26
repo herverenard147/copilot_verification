@@ -101,7 +101,7 @@ class UserSession:
         } for it in receipt.items]
 
     def _receipt_row(self, rid, receipt, category, flags, merchant, doc_type,
-                     invoice_number, account_overrides):
+                     invoice_number, account_overrides, image_data):
         return {
             "receipt_id": rid, "n_items": len(receipt.items),
             "items_sum": receipt.items_sum(), "subtotal": receipt.subtotal,
@@ -110,31 +110,40 @@ class UserSession:
             "tax_ok": flags["tax_ok"], "anomaly": flags["anomaly"],
             "category": category, "merchant": merchant, "doc_type": doc_type,
             "invoice_number": invoice_number, "account_overrides": account_overrides,
+            # miniature base64 du recu (affichage detail). None pour la demo /
+            # les anciens recus -> le front affiche un espace reserve.
+            "image_data": image_data,
         }
 
     def add_receipt(self, receipt, category, flags, merchant=None, doc_type="ticket",
-                    invoice_number=None, account_overrides=None):
+                    invoice_number=None, account_overrides=None, image_data=None):
         """Ajoute un recu valide a la session. Renvoie son id local."""
         rid = self._next_id
         self._next_id += 1
         self.items.extend(self._item_rows(rid, receipt, category))
         self.receipts.append(self._receipt_row(rid, receipt, category, flags, merchant,
-                                               doc_type, invoice_number, account_overrides))
+                                               doc_type, invoice_number, account_overrides,
+                                               image_data))
         _save()   # persiste apres chaque reçu validé (si la persistance est active)
         return rid
 
     def update_receipt(self, receipt_id, receipt, category, flags, merchant=None,
-                       doc_type="ticket", invoice_number=None, account_overrides=None):
+                       doc_type="ticket", invoice_number=None, account_overrides=None,
+                       image_data=None):
         """Remplace un recu existant (memes id) par des donnees recalculees.
         Renvoie True si le recu existait, False sinon. Reutilise la meme logique
-        de stockage que add_receipt (aucune duplication)."""
+        de stockage que add_receipt (aucune duplication). Si image_data n'est pas
+        fourni, on CONSERVE l'image existante (une modif ne perd pas la photo)."""
         rid = int(receipt_id)
-        if not any(int(r["receipt_id"]) == rid for r in self.receipts):
+        old = next((r for r in self.receipts if int(r["receipt_id"]) == rid), None)
+        if old is None:
             return False
+        if image_data is None:
+            image_data = old.get("image_data")
         self.items = [it for it in self.items if int(it["receipt_id"]) != rid]
         self.items.extend(self._item_rows(rid, receipt, category))
         new_row = self._receipt_row(rid, receipt, category, flags, merchant, doc_type,
-                                    invoice_number, account_overrides)
+                                    invoice_number, account_overrides, image_data)
         self.receipts = [new_row if int(r["receipt_id"]) == rid else r for r in self.receipts]
         _save()
         return True

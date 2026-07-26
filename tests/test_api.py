@@ -168,6 +168,57 @@ def test_mapping_automatique_inchange():
     assert map_category_to_account("food") == "601"        # comportement par défaut intact
 
 
+def test_extract_renvoie_une_miniature_redimensionnee(monkeypatch):
+    monkeypatch.setattr(api, "get_donut", lambda: (None, None, "cpu"))
+    monkeypatch.setattr(api, "extract",
+                        lambda *a, **k: {"menu": [{"nm": "X", "price": "1000"}], "total": {"total_price": "1000"}})
+    r = client.post("/api/extract", files={"file": ("r.png", png_bytes((2000, 1500)), "image/png")},
+                    data={"country": "ID"}, headers={"X-Session-Id": "img"})
+    b = r.json()
+    assert b["image_data"].startswith("data:image/jpeg;base64,")
+    import base64
+    import io
+    raw = base64.b64decode(b["image_data"].split(",", 1)[1])
+    thumb = Image.open(io.BytesIO(raw))
+    assert thumb.width <= 800                 # redimensionnée (2000 -> <=800)
+
+
+def test_image_stockee_et_recuperable():
+    sid = {"X-Session-Id": "imgstore"}
+    du = "data:image/jpeg;base64,/9j/4AAQSkZJRg=="
+    v = client.post("/api/validate", json={"items": [{"name": "x", "line_price": 1000}],
+        "subtotal": 1000, "total": 1000, "category": "food", "country": "ID",
+        "image_data": du, "persist": True}, headers=sid).json()
+    d = client.get(f"/api/receipt/{v['receipt_id']}?country=ID", headers=sid).json()
+    assert d["image_data"] == du              # stockée puis récupérable
+
+
+def test_recu_sans_image_renvoie_none():
+    sid = {"X-Session-Id": "noimg"}
+    v = client.post("/api/validate", json={"items": [{"name": "x", "line_price": 1000}],
+        "subtotal": 1000, "total": 1000, "category": "food", "country": "ID", "persist": True}, headers=sid).json()
+    d = client.get(f"/api/receipt/{v['receipt_id']}?country=ID", headers=sid).json()
+    assert d["image_data"] is None            # -> le front affiche l'espace réservé
+
+
+def test_mode_demo_aucune_image_stockee():
+    sid = {"X-Session-Id": "demoimg"}
+    client.post("/api/settings/demo", json={"enabled": True}, headers=sid)
+    d = client.get("/api/receipt/0?country=ID", headers=sid).json()
+    assert d["image_data"] is None            # aucun stockage d'image CORD
+
+
+def test_update_conserve_image_si_non_renvoyee():
+    sid = {"X-Session-Id": "updimg"}
+    du = "data:image/jpeg;base64,/9j/AAAA"
+    v = client.post("/api/validate", json={"items": [{"name": "x", "line_price": 1000}],
+        "subtotal": 1000, "total": 1000, "category": "food", "country": "ID",
+        "image_data": du, "persist": True}, headers=sid).json()
+    u = client.put(f"/api/receipt/{v['receipt_id']}", json={"items": [{"name": "x", "line_price": 2000}],
+        "subtotal": 2000, "total": 2000, "category": "food", "country": "ID"}, headers=sid).json()
+    assert u["image_data"] == du              # image conservée malgré la modif
+
+
 def test_extract_image_valide_200(monkeypatch):
     # Donut simule : renvoie un JSON CORD exploitable, sans charger le vrai modele
     monkeypatch.setattr(api, "get_donut", lambda: (None, None, "cpu"))

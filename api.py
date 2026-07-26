@@ -33,7 +33,7 @@ from src.accounting import (
     journal_entry, is_balanced, vat_recoverable, vat_summary, expense_report,
     apply_account_overrides, DISCLAIMER, CHART_OF_ACCOUNTS, PAYMENT_ACCOUNTS, CHARGE_ACCOUNTS,
 )
-from src.preprocess import preprocess_image, resolution_info
+from src.preprocess import preprocess_image, resolution_info, image_to_thumbnail_datauri
 from src.extractor import extract
 from src.llm import (
     extract_receipt_via_vision, VisionUnavailable,
@@ -391,6 +391,14 @@ def api_extract(file: UploadFile = File(...), country: str = Form("ID"),
             " ".join(str(it.get("name") or "") for it in receipt.items))
         receipt.items = filter_invoice_headers(receipt.items)
 
+    # Miniature (~800px) de l'image d'origine, pour l'AFFICHER plus tard dans le
+    # détail. Encodée en base64 ; le front la renvoie à la validation pour la
+    # stocker avec le reçu. Jamais la pleine résolution (poids maîtrisé).
+    try:
+        image_data = image_to_thumbnail_datauri(image)
+    except Exception:
+        image_data = None
+
     bundle = build_receipt_bundle(receipt, country, payment_mode, _nan(merchant))
     bundle.update({
         "engine": engine,
@@ -401,6 +409,7 @@ def api_extract(file: UploadFile = File(...), country: str = Form("ID"),
         "payment_mode": payment_mode,
         "doc_type": doc_type,
         "invoice_number": invoice_number,
+        "image_data": image_data,
     })
     return ok(bundle)
 
@@ -421,6 +430,7 @@ class ValidatePayload(BaseModel):
     doc_type: str = "ticket"            # 'ticket' ou 'facture' (contexte du recu)
     invoice_number: str | None = None   # numero de facture trouve a l'extraction
     account_overrides: dict | None = None  # {index_ligne_charge: compte} surcharge manuelle
+    image_data: str | None = None       # miniature base64 du recu (affichage detail)
     persist: bool = True
 
 
@@ -453,7 +463,8 @@ def api_validate(payload: ValidatePayload, request: Request):
         new_id = session.add_receipt(receipt, payload.category, bundle["audit"],
                                      merchant=_nan(payload.merchant), doc_type=payload.doc_type,
                                      invoice_number=_nan(payload.invoice_number),
-                                     account_overrides=overrides)
+                                     account_overrides=overrides,
+                                     image_data=_nan(payload.image_data))
         bundle["persisted"] = True
         bundle["receipt_id"] = new_id
         bundle["demo_mode"] = session.demo_mode
@@ -504,6 +515,7 @@ def api_receipt(receipt_id: int, request: Request, country: str = "ID",
     bundle["doc_type"] = _nan(row.get("doc_type")) or "ticket"
     bundle["invoice_number"] = _nan(row.get("invoice_number"))
     bundle["account_overrides"] = overrides or {}
+    bundle["image_data"] = _nan(row.get("image_data"))   # None si démo/ancien reçu
     bundle["demo_mode"] = session.demo_mode
     return ok(bundle)
 
@@ -528,10 +540,14 @@ def api_receipt_update(receipt_id: int, payload: ValidatePayload, request: Reque
                                   account_overrides=overrides)
     session.update_receipt(receipt_id, receipt, payload.category, bundle["audit"],
                            merchant=_nan(payload.merchant), doc_type=payload.doc_type,
-                           invoice_number=_nan(payload.invoice_number), account_overrides=overrides)
+                           invoice_number=_nan(payload.invoice_number), account_overrides=overrides,
+                           image_data=_nan(payload.image_data))
+    # image conservée si non renvoyée : on relit la ligne à jour pour l'exposer
+    updated_row, _ = session.get_receipt(receipt_id)
     bundle.update({"receipt_id": receipt_id, "category": payload.category,
                    "doc_type": payload.doc_type, "invoice_number": _nan(payload.invoice_number),
                    "account_overrides": overrides or {}, "updated": True,
+                   "image_data": _nan(updated_row.get("image_data")) if updated_row else None,
                    "demo_mode": session.demo_mode})
     return ok(bundle)
 
