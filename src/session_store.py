@@ -92,7 +92,8 @@ class UserSession:
         _save()   # persiste l'etat vidé (retire cette session du fichier)
 
     # -- ecriture (memoire seule) --------------------------------------------
-    def add_receipt(self, receipt, category, flags, merchant=None, doc_type="ticket"):
+    def add_receipt(self, receipt, category, flags, merchant=None, doc_type="ticket",
+                    invoice_number=None):
         """Ajoute un recu valide a la session. Renvoie son id local."""
         rid = self._next_id
         self._next_id += 1
@@ -110,6 +111,7 @@ class UserSession:
             "line_sum_ok": flags["line_sum_ok"], "total_ok": flags["total_ok"],
             "tax_ok": flags["tax_ok"], "anomaly": flags["anomaly"],
             "category": category, "merchant": merchant, "doc_type": doc_type,
+            "invoice_number": invoice_number,
         })
         _save()   # persiste apres chaque reçu validé (si la persistance est active)
         return rid
@@ -163,7 +165,9 @@ class UserSession:
             for _, row in flagged.iterrows():
                 rule, la, va, lb, vb = _failing_rule(row)
                 anomalies.append({"receipt_id": int(row["receipt_id"]), "rule": rule,
-                                  "a_label": la, "a_value": va, "b_label": lb, "b_value": vb})
+                                  "a_label": la, "a_value": va, "b_label": lb, "b_value": vb,
+                                  "doc_type": _nan(row.get("doc_type")) or "ticket",
+                                  "invoice_number": _nan(row.get("invoice_number"))})
 
         receipts_list = [{
             "receipt_id": int(r["receipt_id"]),
@@ -176,6 +180,8 @@ class UserSession:
             "line_sum_ok": _flag(r.get("line_sum_ok")),
             "total_ok": _flag(r.get("total_ok")),
             "tax_ok": _flag(r.get("tax_ok")),
+            "doc_type": r.get("doc_type") or "ticket",
+            "invoice_number": r.get("invoice_number"),
         } for r in self.receipts]
 
         return {"empty": False, "kpis": kpis, "by_category": by_category,
@@ -216,6 +222,8 @@ class UserSession:
             recoverable, reason = vat_recoverable(r, merchant=merchant)
             vat_records.append({"tax": r.tax or 0, "recoverable": recoverable, "reason": reason})
             # Résumé cliquable + motif TVA, pour filtrer la liste par motif.
+            doc_type = _nan(row.get("doc_type")) or "ticket"
+            invoice_number = _nan(row.get("invoice_number"))
             receipts_list.append({
                 "receipt_id": rid, "category": _nan(row.get("category")),
                 "total": _nan(row.get("total")), "n_items": int(row.get("n_items") or 0),
@@ -224,12 +232,14 @@ class UserSession:
                 "total_ok": _flag(row.get("total_ok")),
                 "tax_ok": _flag(row.get("tax_ok")),
                 "vat_reason": reason,
+                "doc_type": doc_type, "invoice_number": invoice_number,
             })
             try:
                 entry = journal_entry(r, category=_nan(row.get("category")),
                                       payment_mode=payment_mode, country=country, merchant=merchant)
                 journal_groups.append({"receipt_id": rid,
-                                       "balanced": is_balanced(entry), "lines": entry})
+                                       "balanced": is_balanced(entry), "lines": entry,
+                                       "doc_type": doc_type, "invoice_number": invoice_number})
             except (ValueError, KeyError):
                 continue
 

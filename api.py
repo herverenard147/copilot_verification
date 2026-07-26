@@ -27,7 +27,7 @@ from pydantic import BaseModel
 
 logger = logging.getLogger("copilote.api")
 
-from src.receipt import Receipt, filter_invoice_headers
+from src.receipt import Receipt, filter_invoice_headers, find_invoice_number
 from src.rules import audit, TAX_RATES
 from src.accounting import (
     journal_entry, is_balanced, vat_recoverable, vat_summary, expense_report,
@@ -366,7 +366,12 @@ def api_extract(file: UploadFile = File(...), country: str = Form("ID"),
     # Post-traitement FACTURE (regles simples) : retire les lignes d'en-tete
     # (nom/adresse/email captes comme 'articles' sans montant, en tete de liste).
     # Le mode 'ticket' ne touche a rien -> comportement identique a avant.
+    invoice_number = None
     if doc_type == "facture":
+        # numero cherche AVANT le filtre (la ligne "Facture n°..." est un en-tete
+        # sans montant qui sera justement retiree). Texte deja extrait, pas Donut.
+        invoice_number = find_invoice_number(
+            " ".join(str(it.get("name") or "") for it in receipt.items))
         receipt.items = filter_invoice_headers(receipt.items)
 
     bundle = build_receipt_bundle(receipt, country, payment_mode, _nan(merchant))
@@ -378,6 +383,7 @@ def api_extract(file: UploadFile = File(...), country: str = Form("ID"),
         "country": country,
         "payment_mode": payment_mode,
         "doc_type": doc_type,
+        "invoice_number": invoice_number,
     })
     return ok(bundle)
 
@@ -396,6 +402,7 @@ class ValidatePayload(BaseModel):
     country: str = "ID"                 # defaut ID : le corpus CORD est indonesien
     payment_mode: str = "cash"
     doc_type: str = "ticket"            # 'ticket' ou 'facture' (contexte du recu)
+    invoice_number: str | None = None   # numero de facture trouve a l'extraction
     persist: bool = True
 
 
@@ -432,11 +439,13 @@ def api_validate(payload: ValidatePayload, request: Request):
     if payload.persist:
         session = _session(request)
         new_id = session.add_receipt(receipt, payload.category, bundle["audit"],
-                                     merchant=_nan(payload.merchant), doc_type=payload.doc_type)
+                                     merchant=_nan(payload.merchant), doc_type=payload.doc_type,
+                                     invoice_number=_nan(payload.invoice_number))
         bundle["persisted"] = True
         bundle["receipt_id"] = new_id
         bundle["demo_mode"] = session.demo_mode
     bundle["doc_type"] = payload.doc_type
+    bundle["invoice_number"] = _nan(payload.invoice_number)
     return ok(bundle)
 
 
@@ -478,6 +487,7 @@ def api_receipt(receipt_id: int, request: Request, country: str = "ID",
     bundle["receipt_id"] = receipt_id
     bundle["category"] = _nan(row.get("category"))
     bundle["doc_type"] = _nan(row.get("doc_type")) or "ticket"
+    bundle["invoice_number"] = _nan(row.get("invoice_number"))
     bundle["demo_mode"] = session.demo_mode
     return ok(bundle)
 

@@ -1,8 +1,27 @@
 """La classe Receipt : UN recu = UN objet, avec ses donnees et ses calculs."""
 import math
+import re
 
 from src.utils import clean_amount, ensure_list
 from src.data_loader import merge_blocks
+
+
+# Numero de facture dans du texte DEJA extrait (pas une nouvelle extraction).
+# Marqueur (facture / n° / no / number / numero / #) suivi d'un numero.
+_INVOICE_NUMBER_RE = re.compile(
+    r"(?:facture|invoice|num[ée]ro|number|n[°o]?|#)\s*[°:.#\-]?\s*(\d[\w/\-]*)",
+    re.IGNORECASE,
+)
+
+
+def find_invoice_number(text):
+    """Cherche un numero de facture dans du texte deja extrait (regex simple,
+    insensible a la casse). Renvoie le numero (str) ou None si absent -- aucun
+    echec : pas de numero = pas de numero affiche."""
+    if not text:
+        return None
+    m = _INVOICE_NUMBER_RE.search(text)
+    return m.group(1) if m else None
 
 
 def filter_invoice_headers(items):

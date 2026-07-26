@@ -1,5 +1,5 @@
 """Tests des regles metier. Lancer avec : pytest tests/ -q"""
-from src.receipt import Receipt, filter_invoice_headers
+from src.receipt import Receipt, filter_invoice_headers, find_invoice_number
 from src.rules import check_line_sum, check_total, check_tax_rate, check_magnitude, audit
 from src.accounting import journal_entry, is_balanced
 
@@ -43,6 +43,16 @@ def test_filter_ticket_avec_prix_ne_retire_rien():
 
 def test_filter_liste_vide_ne_plante_pas():
     assert filter_invoice_headers([]) == []
+
+
+def test_find_invoice_number():
+    assert find_invoice_number("Facture n 12345") == "12345"      # sortie Donut RÉELLE
+    assert find_invoice_number("Facture n°12345") == "12345"
+    assert find_invoice_number("INVOICE #007") == "007"
+    assert find_invoice_number("Numéro : 2024-88") == "2024-88"
+    assert find_invoice_number("Nasi Goreng Ayam") is None        # pas de faux positif
+    assert find_invoice_number("") is None
+    assert find_invoice_number(None) is None
 
 
 def make(prices, subtotal, tax, total):

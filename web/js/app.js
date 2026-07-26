@@ -35,6 +35,18 @@ function money(v) {
   return n.toLocaleString('fr-FR', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
 
+// Libellé d'un document selon son type (affichage seul) :
+//  facture + numéro trouvé -> "Facture n°{num}" ; facture sans numéro ->
+//  "Facture #{id}" ; ticket (défaut) -> "Reçu #{id}" (inchangé). Renvoie du
+//  HTML déjà échappé.
+function receiptLabel(r) {
+  const id = r.receipt_id;
+  if (r && r.doc_type === 'facture') {
+    return r.invoice_number ? `Facture n°${esc(r.invoice_number)}` : `Facture #${id}`;
+  }
+  return `Reçu #${id}`;
+}
+
 // chip 3 états : true=✅ / false=❌ / null=➖ (gris NEUTRE, jamais alarmant)
 // Le title explicite chaque état — notamment ➖, souvent mal compris.
 function chip(label, value) {
@@ -437,7 +449,11 @@ function readReceiptFromDOM() {
     subtotal: num('in-subtotal'), tax: num('in-tax'), total: num('in-total'),
     account: $('#sel-account') ? $('#sel-account').value : null,
     merchant: state.result?.receipt?.merchant ?? null,
-    country: state.country, payment_mode: state.payment, doc_type: state.docType, persist: false,
+    country: state.country, payment_mode: state.payment,
+    // conserve le type + le numéro trouvés à l'extraction (contexte du reçu)
+    doc_type: state.result?.doc_type ?? state.docType,
+    invoice_number: state.result?.invoice_number ?? null,
+    persist: false,
   };
 }
 
@@ -547,7 +563,7 @@ async function loadDashboard() {
       </div>
       <div class="section-body stack">${d.anomalies.slice(0, 30).map(a => `
         <div class="card receipt-open receipt-review" data-id="${a.receipt_id}" title="Voir le détail du reçu"><div class="section-body">
-          <b>Reçu #${a.receipt_id}</b> — ${esc(a.rule)}
+          <b>${receiptLabel(a)}</b> — ${esc(a.rule)}
           ${a.a_label ? `<div class="muted body-sm tabular">${esc(a.a_label)} : ${money(a.a_value)} · ${esc(a.b_label)} : ${money(a.b_value)}
             · Écart : ${money(Math.abs((a.b_value || 0) - (a.a_value || 0)))}</div>` : ''}
         </div></div>`).join('')}
@@ -612,7 +628,7 @@ function receiptDetailHtml(id, d, country) {
       <button class="btn" id="detail-back">← Retour</button></div>
     ${encart}
     <div class="card"><div class="section-head">
-      <span class="label-caps">Reçu #${esc(id)}${d.category ? ' — ' + esc(d.category) : ''}</span></div>
+      <span class="label-caps">${receiptLabel({ doc_type: d.doc_type, invoice_number: d.invoice_number, receipt_id: id })}${d.category ? ' — ' + esc(d.category) : ''}</span></div>
       <div class="section-body muted body-sm">Reçu enregistré — aucune image conservée (données en mémoire de session).</div></div>
     <div class="card"><div class="section-head"><span class="label-caps">Articles</span></div>
       <table><thead><tr><th>Article</th><th class="num">Qté</th><th class="num">Prix unit.</th>
@@ -630,7 +646,7 @@ function receiptDetailHtml(id, d, country) {
 function receiptRowHtml(r) {
   const st = receiptStatus(r);
   return `<tr class="receipt-open ${st.rowClass}" data-id="${r.receipt_id}" data-status="${st.status}" title="Voir le détail du reçu">
-    <td><b>#${r.receipt_id}</b></td><td>${esc(r.category || '—')}</td>
+    <td><b>${receiptLabel(r)}</b></td><td>${esc(r.category || '—')}</td>
     <td class="num">${r.n_items}</td><td class="num">${money(r.total)}</td>
     <td>${st.badge}</td></tr>`;
 }
@@ -753,7 +769,7 @@ async function renderAccounting() {
 
     const rows = d.journal.slice(0, 100).map(g => g.lines.map((l, i) => `
       <tr class="${g.balanced ? '' : 'unbalanced'}">
-        ${i === 0 ? `<td rowspan="${g.lines.length}" class="receipt-open" data-id="${g.receipt_id}" title="Voir le détail du reçu"><b>#${g.receipt_id}</b> ${g.balanced ? '✅' : '❌'}</td>` : ''}
+        ${i === 0 ? `<td rowspan="${g.lines.length}" class="receipt-open" data-id="${g.receipt_id}" title="Voir le détail du reçu"><b>${receiptLabel(g)}</b> ${g.balanced ? '✅' : '❌'}</td>` : ''}
         <td>${esc(l.account)}</td><td>${esc(l.label)}</td>
         <td class="num">${money(l.debit)}</td><td class="num">${money(l.credit)}</td></tr>`).join('')).join('');
     const journalCard = `<div class="card"><div class="section-head"><span class="label-caps">Journal général, groupé par reçu</span>

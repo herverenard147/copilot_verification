@@ -88,6 +88,38 @@ def test_extract_mode_ticket_ne_change_rien(monkeypatch):
     assert body["doc_type"] == "ticket"
 
 
+def test_extract_facture_trouve_le_numero(monkeypatch):
+    monkeypatch.setattr(api, "get_donut", lambda: (None, None, "cpu"))
+    monkeypatch.setattr(api, "extract", lambda *a, **k: _FACTURE_MENU)
+    r = client.post("/api/extract", files={"file": ("f.png", png_bytes(), "image/png")},
+                    data={"country": "ID", "doc_type": "facture"}, headers={"X-Session-Id": "num"})
+    assert r.json()["invoice_number"] == "12345"
+
+
+def test_extract_ticket_ne_cherche_pas_de_numero(monkeypatch):
+    monkeypatch.setattr(api, "get_donut", lambda: (None, None, "cpu"))
+    monkeypatch.setattr(api, "extract", lambda *a, **k: _FACTURE_MENU)
+    r = client.post("/api/extract", files={"file": ("f.png", png_bytes(), "image/png")},
+                    data={"country": "ID", "doc_type": "ticket"}, headers={"X-Session-Id": "tic2"})
+    assert r.json()["invoice_number"] is None
+
+
+def test_facture_numero_conserve_dashboard_et_detail():
+    """Le numero de facture est conserve dans le contexte et exposé partout."""
+    sid = {"X-Session-Id": "lbl"}
+    v = client.post("/api/validate", json={
+        "items": [{"name": "Creation de logo", "line_price": 900}],
+        "subtotal": 900, "total": 900, "category": "advertising", "country": "ID",
+        "doc_type": "facture", "invoice_number": "12345", "persist": True}, headers=sid).json()
+    assert v["doc_type"] == "facture" and v["invoice_number"] == "12345"
+
+    rr = client.get("/api/dashboard", headers=sid).json()["receipts"][0]
+    assert rr["doc_type"] == "facture" and rr["invoice_number"] == "12345"   # dashboard
+
+    det = client.get(f"/api/receipt/{v['receipt_id']}?country=ID", headers=sid).json()
+    assert det["doc_type"] == "facture" and det["invoice_number"] == "12345"  # détail
+
+
 def test_extract_image_valide_200(monkeypatch):
     # Donut simule : renvoie un JSON CORD exploitable, sans charger le vrai modele
     monkeypatch.setattr(api, "get_donut", lambda: (None, None, "cpu"))
