@@ -19,7 +19,7 @@ from src.accounting import (
 )
 from src.session_store import UserSession
 
-st.set_page_config(page_title="Copilote de reçus", page_icon="🧾", layout="wide")
+st.set_page_config(page_title="ReceiptFlow", page_icon="🧾", layout="wide")
 
 COUNTRY_LABELS = {"CI": "Côte d'Ivoire — TVA 18%", "ID": "Indonésie — TVA 11%"}
 PAYMENT_LABELS = {"cash": "Espèces (caisse)", "bank": "Virement bancaire", "credit": "À crédit (fournisseur)"}
@@ -942,7 +942,7 @@ def main():
     session = st.session_state.user_session
     render_settings_sidebar(session, reference)
 
-    st.title("🧾 Copilote de reçus et dépenses")
+    st.title("🧾 ReceiptFlow — Copilote de reçus et dépenses")
     st.caption("Extraction automatique · vérification comptable · recherche sémantique")
 
     # Bandeau permanent du mode demonstration -- toujours visible, jamais silencieux.

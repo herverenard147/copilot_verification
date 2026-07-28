@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Copilote de reçus — logique front (vanilla JS)
+   ReceiptFlow — logique front (vanilla JS)
    Fidèle au design Stitch (voir DESIGN.md). Appelle l'API FastAPI (api.js).
    Non négociables : chips 3 états (➖ neutre), table éditable avec recalcul
    live via /api/validate, bandeau CI expérimental + moteur affiché, jamais
