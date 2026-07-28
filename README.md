@@ -1,5 +1,5 @@
 ---
-title: Copilote de reçus et dépenses
+title: ReceiptFlow
 emoji: 🧾
 colorFrom: blue
 colorTo: green
@@ -8,7 +8,7 @@ app_port: 7860
 pinned: false
 ---
 
-# Receipt & Expense Copilot
+# ReceiptFlow — Receipt & Expense Copilot
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
