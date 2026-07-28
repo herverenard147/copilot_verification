@@ -37,6 +37,14 @@ function money(v) {
   return n.toLocaleString('fr-FR', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
 
+// Largeur d'une barre : 0 quand la valeur est nulle, sinon au moins 3px pour
+// qu'une petite valeur non nulle reste visible (teal) et ne se confonde pas
+// avec le fond gris de la piste.
+function barWidth(value, max) {
+  if (!(value > 0)) return '0';
+  return `max(3px, ${(value / max * 100).toFixed(1)}%)`;
+}
+
 // Libellé d'un document selon son type (affichage seul) :
 //  facture + numéro trouvé -> "Facture n°{num}" ; facture sans numéro ->
 //  "Facture #{id}" ; ticket (défaut) -> "Reçu #{id}" (inchangé). Renvoie du
@@ -596,17 +604,19 @@ async function loadDashboard() {
     </div>`;
 
     const maxCat = Math.max(...d.by_category.map(c => c.total), 1);
-    const cats = `<div class="card"><div class="section-head"><span class="label-caps">Dépenses par catégorie</span></div>
-      <div class="section-body bars">${d.by_category.map(c => `
+    const catBody = d.by_category.length
+      ? `<div class="section-body bars">${d.by_category.map(c => `
         <div class="bar-row"><span>${esc(c.category)}</span>
-          <span class="bar-track"><span class="bar-fill" style="width:${(c.total / maxCat * 100).toFixed(1)}%"></span></span>
-          <span class="num">${money(c.total)}</span></div>`).join('')}</div></div>`;
+          <span class="bar-track"><span class="bar-fill" style="width:${barWidth(c.total, maxCat)}"></span></span>
+          <span class="num">${money(c.total)}</span></div>`).join('')}</div>`
+      : `<div class="section-body"><p class="muted body-sm">Aucune catégorie identifiée</p></div>`;
+    const cats = `<div class="card"><div class="section-head"><span class="label-caps">Dépenses par catégorie</span></div>${catBody}</div>`;
 
     const maxD = Math.max(...d.distribution.map(x => x.count), 1);
     const dist = `<div class="card"><div class="section-head"><span class="label-caps">Répartition des totaux</span></div>
       <div class="section-body bars">${d.distribution.map(x => `
         <div class="bar-row"><span class="body-sm">${esc(x.range)}</span>
-          <span class="bar-track"><span class="bar-fill" style="width:${(x.count / maxD * 100).toFixed(1)}%"></span></span>
+          <span class="bar-track"><span class="bar-fill" style="width:${barWidth(x.count, maxD)}"></span></span>
           <span class="num">${x.count}</span></div>`).join('')}</div></div>`;
 
     const totalReceipts = k.n_receipts || (d.receipts ? d.receipts.length : 0);

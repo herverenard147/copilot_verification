@@ -188,17 +188,36 @@ class UserSession:
             "n_anomalies": n_anomalies,
         }
 
+        # Depenses par categorie : une barre par categorie reellement presente.
+        # Les articles sans categorie (classifieur muet, ancien recu) sont
+        # regroupes sous "Non categorise" plutot que SILENCIEUSEMENT ecartes --
+        # sinon groupby(dropna=True) les supprime et le cadre parait vide alors
+        # que des articles existent (bug observe : 1 recu, 6 articles -> vide).
         by_category = []
         if not items.empty and "category" in items.columns:
-            grouped = items.groupby("category")["line_price"].sum().sort_values(ascending=False)
+            cat = items["category"].where(items["category"].notna(), "Non catégorisé")
+            cat = cat.replace("", "Non catégorisé")
+            grouped = items.assign(category=cat).groupby("category")["line_price"] \
+                .sum().sort_values(ascending=False)
             by_category = [{"category": str(c), "total": float(v)} for c, v in grouped.items()]
 
+        # Repartition des totaux : histogramme adapte au nombre de valeurs
+        # DISTINCTES. Avec un seul montant on affiche CE montant (une barre),
+        # pas 10 tranches quasi identiques nees du binning force de numpy
+        # (range +/-0.5 autour d'une valeur unique -> libelles "5 579-5 579").
         totals = receipts["total"].dropna().to_numpy()
         distribution = []
         if len(totals):
-            counts, edges = np.histogram(totals, bins=10)
-            distribution = [{"range": f"{int(edges[i]):,}–{int(edges[i + 1]):,}".replace(",", " "),
-                             "count": int(counts[i])} for i in range(len(counts))]
+            distinct = np.unique(totals)
+            if len(distinct) == 1:
+                v = float(distinct[0])
+                distribution = [{"range": f"{round(v):,}".replace(",", " "),
+                                 "count": int(len(totals))}]
+            else:
+                nbins = min(10, len(distinct))
+                counts, edges = np.histogram(totals, bins=nbins)
+                distribution = [{"range": f"{round(edges[i]):,}–{round(edges[i + 1]):,}".replace(",", " "),
+                                 "count": int(counts[i])} for i in range(len(counts))]
 
         anomalies = []
         if n_anomalies:
