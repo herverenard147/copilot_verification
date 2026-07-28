@@ -1,0 +1,31 @@
+# Contexte de build minimal : on n'envoie au démon Docker que ce qui sert à
+# l'exécution (src/, web/, api.py, data/, requirements.txt, README.md).
+.git
+.gitignore
+.venv
+venv
+env
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+
+# État local (base SQLite éphémère recréée dans le conteneur)
+.local_state
+
+# Développement / exploration, inutiles au runtime
+notebooks
+tests
+.claude
+scratchpad
+
+# Documents de présentation (non nécessaires à l'image)
+0*.md
+notes_projet.md
+
+# Divers
+.DS_Store
+node_modules
+models/*.bin

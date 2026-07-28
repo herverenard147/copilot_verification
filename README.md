@@ -1,3 +1,13 @@
+---
+title: Copilote de reçus et dépenses
+emoji: 🧾
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Receipt & Expense Copilot
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
