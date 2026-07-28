@@ -291,3 +291,27 @@ pre { background: var(--surface-low); padding: var(--md); border-radius: var(--r
 .editable td[contenteditable]:focus { background: #fffbe6; box-shadow: inset 0 0 0 2px var(--warning-container); }
 .error-box { background: var(--error-container); color: var(--on-error-container); padding: var(--md); border-radius: var(--radius); }
 svg.loss { width: 100%; height: 220px; }
+
+/* Diagrammes explicatifs (vulgarisation, Tâche 3) — SVG inline, pas de librairie */
+.flow-details { border: none; padding: 0; margin-bottom: var(--sm); }
+.flow-details summary { list-style: none; }
+.flow-details summary::-webkit-details-marker { display: none; }
+.flow-wrap { margin-top: var(--sm); }
+.flow-wrap--static { padding: var(--md); background: var(--surface-low); border-radius: var(--radius-lg); margin-top: var(--sm); }
+.flow-svg { width: 100%; max-width: 600px; height: auto; display: block; margin: 0 auto; }
+.flow-box { fill: var(--card); stroke: var(--outline-variant); stroke-width: 1; }
+.flow-box--primary { fill: var(--primary-container); stroke: var(--primary-container); }
+.flow-label { font-family: var(--font-body); font-size: 14px; font-weight: 600; fill: var(--on-surface); }
+.flow-label--on-primary { fill: var(--on-primary); }
+.flow-sub { font-family: var(--font-body); font-size: 11px; fill: var(--on-surface-variant); }
+.flow-box--primary + .flow-sub, .flow-label--on-primary { fill: var(--on-primary); }
+.flow-arrow { stroke: var(--outline); stroke-width: 2; }
+.flow-arrowhead { fill: var(--outline); }
+.flow-arrow-txt { color: var(--primary); font-weight: 700; }
+
+/* Diagramme TVA récupérable / non récupérable (2 colonnes) */
+.vat-diagram { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--lg); }
+.vat-col { padding: var(--sm); border-radius: var(--radius); }
+.vat-col--ok { box-shadow: inset 3px 0 0 var(--tertiary); }
+.vat-col--bad { box-shadow: inset 3px 0 0 var(--warning); }
+.vat-col-head { font-size: 12px; color: var(--on-surface-variant); margin-bottom: var(--xs); }

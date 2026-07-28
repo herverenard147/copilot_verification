@@ -77,6 +77,24 @@
   <!-- ONGLET 4 : QUESTIONS -->
   <section id="tab-ask" class="tab hidden">
     <h2 class="headline-sm" style="margin-top:0">Interroger l'historique de dépenses</h2>
+    <div class="flow-wrap flow-wrap--static" style="margin-bottom:var(--md)">
+      <svg viewBox="0 0 600 110" class="flow-svg" role="img" aria-label="Votre question, puis recherche parmi vos reçus, puis réponse construite à partir de vrais documents">
+        <rect x="10" y="20" width="170" height="60" rx="8" class="flow-box"/>
+        <text x="95" y="46" class="flow-label" text-anchor="middle">💬 Votre question</text>
+        <text x="95" y="65" class="flow-sub" text-anchor="middle">ex. « boissons ? »</text>
+        <line x1="185" y1="50" x2="211" y2="50" class="flow-arrow"/>
+        <polygon points="211,43 226,50 211,57" class="flow-arrowhead"/>
+        <rect x="232" y="20" width="170" height="60" rx="8" class="flow-box"/>
+        <text x="317" y="46" class="flow-label" text-anchor="middle">🔎 Recherche</text>
+        <text x="317" y="65" class="flow-sub" text-anchor="middle">parmi vos reçus</text>
+        <line x1="407" y1="50" x2="433" y2="50" class="flow-arrow"/>
+        <polygon points="433,43 448,50 433,57" class="flow-arrowhead"/>
+        <rect x="454" y="20" width="146" height="60" rx="8" class="flow-box flow-box--primary"/>
+        <text x="527" y="46" class="flow-label flow-label--on-primary" text-anchor="middle">✅ Réponse</text>
+        <text x="527" y="65" class="flow-sub flow-label--on-primary" text-anchor="middle">à partir de vos reçus</text>
+      </svg>
+      <p class="muted body-sm">La réponse n'est pas inventée : elle est construite à partir des reçus réels retrouvés ci-dessous.</p>
+    </div>
     <div style="margin:var(--md) 0">
       <input id="ask-input" placeholder="Ex. : combien ai-je dépensé en boissons ?" />
     </div>
