@@ -166,12 +166,40 @@ function receiptStatus(r) {
   return { status: 'nodata', rowClass: '', badge: `<span class="badge badge--nodata">— Données insuffisantes</span>` };
 }
 
+// Diagramme repliable "Comment ça marche ?" — flux article -> compte -> écriture
+// (Vulgarisation, Tâche 3a). SVG inline pur, pas de librairie.
+function flowDiagram() {
+  return `<details class="flow-details">
+    <summary>❔ Comment ça marche ?</summary>
+    <div class="flow-wrap">
+      <svg viewBox="0 0 600 110" class="flow-svg" role="img" aria-label="Article acheté, puis compte comptable, puis écriture">
+        <rect x="10" y="20" width="170" height="60" rx="8" class="flow-box"/>
+        <text x="95" y="46" class="flow-label" text-anchor="middle">🛒 Article acheté</text>
+        <text x="95" y="65" class="flow-sub" text-anchor="middle">ex. « Ramette papier »</text>
+        <line x1="185" y1="50" x2="211" y2="50" class="flow-arrow"/>
+        <polygon points="211,43 226,50 211,57" class="flow-arrowhead"/>
+        <rect x="232" y="20" width="170" height="60" rx="8" class="flow-box"/>
+        <text x="317" y="46" class="flow-label" text-anchor="middle">🗂️ Compte comptable</text>
+        <text x="317" y="65" class="flow-sub" text-anchor="middle">ex. 601 — Achats</text>
+        <line x1="407" y1="50" x2="433" y2="50" class="flow-arrow"/>
+        <polygon points="433,43 448,50 433,57" class="flow-arrowhead"/>
+        <rect x="454" y="20" width="146" height="60" rx="8" class="flow-box flow-box--primary"/>
+        <text x="527" y="46" class="flow-label flow-label--on-primary" text-anchor="middle">📒 Écriture</text>
+        <text x="527" y="65" class="flow-sub flow-label--on-primary" text-anchor="middle">Débit / Crédit</text>
+      </svg>
+      <p class="muted body-sm">Chaque article est rattaché à un compte comptable selon sa catégorie
+        (ex. fournitures → 601), qui devient une ligne de l'écriture ci-dessous : le montant sort en
+        Débit (charge), la contrepartie apparaît en Crédit.</p>
+    </div>
+  </details>`;
+}
+
 function engineBadge(engine) {
   if (engine === 'llm_fallback')
-    return `<span class="badge badge--fallback" title="Un LLM de vision a lu l'image parce que Donut n'y arrivait pas (ex. reçu hors de son domaine).">🛰️ Moteur : LLM vision (fallback)</span>`;
+    return `<span class="badge badge--fallback" title="Un modèle d'IA généraliste (LLM) a lu l'image parce que Donut, le modèle spécialisé, n'y arrivait pas (ex. reçu hors de son domaine).">📖 Lecture par IA de secours</span>`;
   if (engine === 'fallback_indisponible')
-    return `<span class="badge badge--fallback" title="Aucun modèle vision accessible avec la clé Groq configurée.">⚠️ Fallback vision indisponible — modèle non accessible avec cette clé</span>`;
-  return `<span class="badge badge--donut" title="Donut : modèle spécialisé reçus, entraîné sur CORD (tickets indonésiens).">🍩 Moteur : Donut</span>`;
+    return `<span class="badge badge--fallback" title="Aucun modèle de secours accessible avec la clé Groq configurée.">⚠️ Lecture de secours indisponible — modèle non accessible avec cette clé</span>`;
+  return `<span class="badge badge--donut" title="Donut : modèle spécialisé reçus, entraîné sur CORD (tickets indonésiens).">🍩 Lecture par Donut (modèle spécialisé)</span>`;
 }
 
 function toast(msg) {
@@ -405,7 +433,8 @@ function renderResult(data) {
         <div class="card">
           <div class="section-head"><span class="label-caps">Écriture comptable proposée</span>
             <span class="muted body-sm">Chaque compte de charge est modifiable</span></div>
-          <table><thead><tr><th>Compte</th><th>Libellé</th><th class="num">Débit</th><th class="num">Crédit</th></tr></thead>
+          <div class="section-body" style="padding-bottom:0">${flowDiagram()}</div>
+          <table><thead><tr><th>Compte</th><th>Libellé</th><th class="num" title="Débit = ce qui sort (une charge pour vous)">Débit</th><th class="num" title="Crédit = ce qui entre / la contrepartie (caisse, banque, fournisseur)">Crédit</th></tr></thead>
             <tbody id="journal-body"></tbody></table>
           <div class="section-body" id="journal-footer"></div>
         </div>
@@ -749,7 +778,7 @@ function receiptDetailHtml(id, d, country) {
         <div class="card"><div class="section-head"><span class="label-caps">Contrôles</span></div>
           <div class="section-body">${controls}</div></div>
         <div class="card"><div class="section-head"><span class="label-caps">Écriture comptable</span></div>
-          <table><thead><tr><th>Compte</th><th>Libellé</th><th class="num">Débit</th><th class="num">Crédit</th></tr></thead>
+          <table><thead><tr><th>Compte</th><th>Libellé</th><th class="num" title="Débit = ce qui sort (une charge pour vous)">Débit</th><th class="num" title="Crédit = ce qui entre / la contrepartie (caisse, banque, fournisseur)">Crédit</th></tr></thead>
             <tbody>${journal}</tbody></table>
           <p class="muted body-sm" style="margin:var(--sm) var(--md)">ℹ️ Affectation comptable indicative, à valider par un professionnel (expert-comptable) avant tout usage officiel.</p></div>
       </div>
@@ -869,9 +898,15 @@ async function renderAccounting() {
     }).join('');
 
     const vatCard = `<div class="card"><div class="section-head"><span class="label-caps">TVA — ${esc(d.period)}</span></div>
-      <div class="section-body grid-2">
-        <div><div class="label-caps">Récupérable</div><div class="headline-sm tabular">${money(v.recoverable_total)}</div></div>
-        <div><div class="label-caps">Non récupérable</div><div class="headline-sm tabular">${money(v.non_recoverable_total)}</div>${reasons}</div>
+      <div class="section-body vat-diagram">
+        <div class="vat-col vat-col--ok">
+          <div class="vat-col-head">🧾 Fournisseur identifié <span class="flow-arrow-txt">→</span> ✅ TVA récupérable</div>
+          <div class="label-caps">Récupérable</div><div class="headline-sm tabular">${money(v.recoverable_total)}</div>
+        </div>
+        <div class="vat-col vat-col--bad">
+          <div class="vat-col-head">❔ Fournisseur non identifié <span class="flow-arrow-txt">→</span> ⚠️ TVA non récupérable</div>
+          <div class="label-caps">Non récupérable</div><div class="headline-sm tabular">${money(v.non_recoverable_total)}</div>${reasons}
+        </div>
       </div></div>`;
 
     const reportCard = `<div class="card"><div class="section-head"><span class="label-caps">Note de frais agrégée</span></div>
@@ -888,7 +923,7 @@ async function renderAccounting() {
         <td class="num">${money(l.debit)}</td><td class="num">${money(l.credit)}</td></tr>`).join('')).join('');
     const journalCard = `<div class="card"><div class="section-head"><span class="label-caps">Journal général, groupé par reçu</span>
       <button class="btn" id="export-journal">📥 Export CSV</button></div>
-      <table><thead><tr><th>Reçu</th><th>Compte</th><th>Libellé</th><th class="num">Débit</th><th class="num">Crédit</th></tr></thead>
+      <table><thead><tr><th>Reçu</th><th>Compte</th><th>Libellé</th><th class="num" title="Débit = ce qui sort (une charge pour vous)">Débit</th><th class="num" title="Crédit = ce qui entre / la contrepartie (caisse, banque, fournisseur)">Crédit</th></tr></thead>
         <tbody>${rows}</tbody></table>
       ${d.journal.length > 100 ? `<div class="section-body muted body-sm">Affichage des 100 premiers reçus sur ${d.journal.length}.</div>` : ''}</div>`;
 
@@ -970,7 +1005,7 @@ async function doAsk() {
       <div class="section-body">${d.answer ? esc(d.answer)
         : `D'après les reçus les plus pertinents pour : <i>${esc(q)}</i>.` +
           (state.config.groq_configured ? '' : ` <span class="muted body-sm">(réponse LLM désactivée : aucune clé Groq)</span>`)}</div></div>`;
-    const sources = `<div class="card"><div class="section-head"><span class="label-caps">Reçus sources — la réponse est fondée sur eux (RAG)</span></div>
+    const sources = `<div class="card"><div class="section-head"><span class="label-caps" title="Recherche augmentée par récupération (RAG) : la réponse est construite à partir de ces documents réels, pas inventée par l'IA.">Reçus sources — la réponse est construite à partir d'eux, pas inventée</span></div>
       <div class="section-body stack">${d.sources.map(s => {
         const clickable = s.receipt_id != null;   // reçu présent dans la session -> cliquable
         return `<div class="card${clickable ? ' receipt-open' : ''}"${clickable ? ` data-id="${s.receipt_id}" title="Voir le détail de ce reçu"` : ''}><div class="section-body">
@@ -1089,7 +1124,8 @@ function renderSettings() {
         <div class="btn-row"><button class="btn" id="btn-key-models">Voir les modèles disponibles</button></div>
         <div id="models-result" class="body-sm"></div>
         <p class="muted body-sm">🔒 Obtenez une clé gratuite sur <b>console.groq.com</b>.
-          Elle sert au fallback vision, à l'extraction marchand/date et aux réponses du RAG.
+          Elle sert à la lecture de secours quand Donut échoue, à l'extraction du nom du commerçant et de la date,
+          et à la rédaction des réponses dans l'onglet Questions.
           La clé reste <b>en mémoire</b> (jamais écrite sur disque, jamais renvoyée par le serveur).</p>
       </div></div>
 
@@ -1143,7 +1179,7 @@ const GROQ_SS_KEY = 'copilote.groqKey';
 const KEY_STATUS_LABEL = {
   env: "✅ Configurée (variable d'environnement) — saisissez une clé pour la remplacer",
   session: '✅ Configurée (session)',
-  none: '➖ Non configurée — recherche sémantique seule',
+  none: '➖ Non configurée — recherche dans vos reçus, sans réponse rédigée',
 };
 
 async function refreshKeyStatus() {
