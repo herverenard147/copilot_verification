@@ -1,5 +1,3 @@
-
-
 # 🧾 ReceiptFlow - Copilote de reçus et dépenses
 
 > De la photo d'un reçu à des dépenses structurées, vérifiées et
@@ -7,15 +5,15 @@
 
 
 
-![Capture d’écran du 2026-07-28 23-11-04.png](/home/joker12/Images/Captures%20d’écran/Capture%20d’écran%20du%202026-07-28%2023-11-04.png)
+[Analyze-result](capture/Capture d’écran du 2026-07-28 23-11-04.png)
 
-![Capture d’écran du 2026-07-28 23-14-01.png](/home/joker12/Images/Captures%20d’écran/Capture%20d’écran%20du%202026-07-28%2023-14-01.png)
+[mode démo](capture/Capture d’écran du 2026-07-28 23-14-01.png)
 
-![Capture d’écran du 2026-07-28 23-16-01.png](/home/joker12/Images/Captures%20d’écran/Capture%20d’écran%20du%202026-07-28%2023-16-01.png)
+[reçu avec son écriture comptable visible](capture/Capture d’écran du 2026-07-28 23-16-01.png)
 
 ## 📹 Démonstration
 
-[Lien vers la vidéo — à ajouter après enregistrement]
+[[Lien vers la demo]](https://www.loom.com/share/6956e73c95e54420b8984bef4f0c980d)
 
 ## Le problème
 
@@ -57,7 +55,7 @@ comptable proposée.
 | Sans régularisation                  | 63,5 % | 52,4 %     | 11,2 % |
 | Avec régularisation + early stopping | 58,0 % | 53,7 %     | 4,3 %  |
 
-![Capture d’écran du 2026-07-28 23-20-27.png](/home/joker12/Images/Captures%20d’écran/Capture%20d’écran%20du%202026-07-28%2023-20-27.png)
+[courbe de perte](capture/Capture d’écran du 2026-07-28 23-20-27.png)
 
 **Règles métier sur les 800 reçus CORD :**
 
@@ -92,8 +90,6 @@ licence CC BY 4.0. Découpage 800 train / 100 validation / 100 test.
 ```
 
 ---
-
-
 
 ## Fonctionnalités
 
