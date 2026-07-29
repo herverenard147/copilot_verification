@@ -5,11 +5,11 @@
 
 
 
-[Analyze-result](capture/Capture d’écran du 2026-07-28 23-11-04.png)
+[Analyze-result](https://github.com/herverenard147/copilot_verification/blob/main/capture/Capture%20d%E2%80%99%C3%A9cran%20du%202026-07-28%2023-11-04.png)
 
-[mode démo](capture/Capture d’écran du 2026-07-28 23-14-01.png)
+[mode démo](https://github.com/herverenard147/copilot_verification/blob/main/capture/Capture%20d%E2%80%99%C3%A9cran%20du%202026-07-28%2023-14-01.png)
 
-[reçu avec son écriture comptable visible](capture/Capture d’écran du 2026-07-28 23-16-01.png)
+[reçu avec son écriture comptable visible](https://github.com/herverenard147/copilot_verification/blob/main/capture/Capture%20d%E2%80%99%C3%A9cran%20du%202026-07-28%2023-16-01.png)
 
 ## 📹 Démonstration
 
@@ -55,7 +55,7 @@ comptable proposée.
 | Sans régularisation                  | 63,5 % | 52,4 %     | 11,2 % |
 | Avec régularisation + early stopping | 58,0 % | 53,7 %     | 4,3 %  |
 
-[courbe de perte](capture/Capture d’écran du 2026-07-28 23-20-27.png)
+[courbe de perte](https://github.com/herverenard147/copilot_verification/blob/main/capture/Capture%20d%E2%80%99%C3%A9cran%20du%202026-07-28%2023-20-27.png)
 
 **Règles métier sur les 800 reçus CORD :**
 
