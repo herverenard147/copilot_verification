@@ -14,7 +14,7 @@ n'applique le ondelete que si les foreign keys sont activees par connexion
 """
 from datetime import datetime, timezone
 
-from sqlalchemy import ForeignKey, JSON, String
+from sqlalchemy import ForeignKey, Integer, JSON, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -58,10 +58,6 @@ class Receipt(Base):
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow, nullable=False)
 
     user: Mapped["User"] = relationship(back_populates="receipts")
-    # Pas de cascade delete-orphan ici : une correction est une donnee
-    # d'entrainement qui doit survivre a la suppression du recu source (seul
-    # receipt_id est detache, voir ondelete="SET NULL" sur Correction).
-    corrections: Mapped[list["Correction"]] = relationship(back_populates="receipt")
 
 
 class Correction(Base):
@@ -78,8 +74,11 @@ class Correction(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    receipt_id: Mapped[int | None] = mapped_column(
-        ForeignKey("receipts.id", ondelete="SET NULL"))
+    # PAS une foreign key vers receipts.id : les recus valides vivent encore
+    # dans src/session_store.py (numerotation par session, pas migree vers
+    # ce modele -- voir la TaskList). C'est un identifiant informatif dans
+    # cet espace-la, pour retrouver le contexte, pas une contrainte d'integrite.
+    receipt_id: Mapped[int | None] = mapped_column(Integer)
     raw_json: Mapped[dict] = mapped_column(JSON, nullable=False)        # sortie brute du modele
     corrected_json: Mapped[dict] = mapped_column(JSON, nullable=False)  # valeurs validees par l'humain
     engine: Mapped[str | None] = mapped_column(String(30))  # donut / llm_fallback : cible l'entrainement
@@ -87,7 +86,6 @@ class Correction(Base):
     created_at: Mapped[datetime] = mapped_column(default=_utcnow, nullable=False)
 
     user: Mapped["User"] = relationship(back_populates="corrections")
-    receipt: Mapped["Receipt | None"] = relationship(back_populates="corrections")
 
 
 class Consent(Base):

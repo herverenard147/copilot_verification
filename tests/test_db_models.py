@@ -74,26 +74,26 @@ def test_suppression_utilisateur_cascade():
         assert s.query(Consent).count() == 0
 
 
-def test_suppression_recu_garde_la_correction():
-    """La donnee d'entrainement (correction) survit a la suppression du recu :
-    seul le lien receipt_id est detache (SET NULL), pas la correction elle-meme."""
+def test_correction_receipt_id_nest_pas_une_foreign_key():
+    """receipt_id sur Correction reste un entier informatif (voir commentaire
+    du modele) : les recus valides vivent encore dans session_store, pas dans
+    la table receipts. Une correction doit donc pouvoir exister avec un
+    receipt_id qui ne correspond a AUCUNE ligne de la table receipts, et
+    survivre telle quelle a la suppression d'un Receipt de ce modele."""
     with db.get_db() as s:
         u = User(email="d@x.com", password_hash="h")
         s.add(u)
         s.flush()
         s.add(Receipt(user_id=u.id, data={"total": 1}))
-        s.flush()
-        r = s.query(Receipt).one()
-        s.add(Correction(user_id=u.id, receipt_id=r.id,
+        s.add(Correction(user_id=u.id, receipt_id=4242,
                          raw_json={"total": 0}, corrected_json={"total": 1}))
 
     with db.get_db() as s:
-        r = s.query(Receipt).one()
-        s.delete(r)
+        s.query(Receipt).delete()
 
     with db.get_db() as s:
         corr = s.query(Correction).one()
-        assert corr.receipt_id is None
+        assert corr.receipt_id == 4242
         assert corr.corrected_json == {"total": 1}
 
 

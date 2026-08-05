@@ -586,6 +586,15 @@ function updateVerifyTag(r) {
 async function saveReceipt() {
   const payload = readReceiptFromDOM();
   payload.persist = true;
+  // Apprentissage par correction humaine (Tâche 4) : seulement si une
+  // extraction fraîche a eu lieu dans cette session (state.result vient de
+  // /api/extract, pas d'un reçu déjà enregistré rouvert pour édition). Le
+  // serveur ignore silencieusement ce champ si l'utilisateur n'est pas
+  // connecté/consentant — rien de plus à gérer côté front.
+  if (state.result?.raw_json) {
+    payload.raw_json = state.result.raw_json;
+    payload.engine = state.result.engine ?? null;
+  }
   try {
     if (state.editingId != null) {                    // MODIFICATION d'un reçu existant
       const id = state.editingId;

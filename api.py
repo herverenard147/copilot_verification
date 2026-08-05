@@ -42,6 +42,7 @@ from src.llm import (
 )
 from src import session_store
 from src import auth as auth_mod
+from src import corrections as corrections_mod
 from src import db as db_mod
 
 DATA = Path("data")
@@ -332,6 +333,41 @@ def api_auth_me(request: Request):
     return ok({"user_id": user_id})
 
 
+class ConsentPayload(BaseModel):
+    consent_type: str = "training_data"
+    granted: bool = True
+
+
+def _require_user(request):
+    """user_id ou reponse d'erreur 401 prete a renvoyer (pas d'exception :
+    les appelants restent de simples fonctions FastAPI, cf. le reste de l'API)."""
+    user_id = _current_user(request)
+    if user_id is None:
+        return None, fail("Non connecté.", status=401, engine="auth",
+                          suggestions=["Se connecter", "Créer un compte"])
+    return user_id, None
+
+
+@app.post("/api/auth/consent")
+@safe
+def api_auth_consent_set(payload: ConsentPayload, request: Request):
+    user_id, error = _require_user(request)
+    if error:
+        return error
+    corrections_mod.set_consent(user_id, payload.consent_type, payload.granted)
+    return ok({"consent_type": payload.consent_type, "granted": payload.granted})
+
+
+@app.get("/api/auth/consent")
+@safe
+def api_auth_consent_get(request: Request, consent_type: str = "training_data"):
+    user_id, error = _require_user(request)
+    if error:
+        return error
+    return ok({"consent_type": consent_type,
+              "granted": corrections_mod.has_consent(user_id, consent_type)})
+
+
 def _nan(value):
     """Case CSV vide (NaN pandas) -> None (NaN est truthy et casse la logique
     a 3 etats des regles)."""
@@ -346,6 +382,27 @@ def _merge_overrides(payload):
     if getattr(payload, "account", None) and "0" not in overrides:
         overrides["0"] = payload.account
     return overrides or None
+
+
+def _capture_correction(request, payload, receipt_id):
+    """Best-effort : capture (prediction brute, valeur corrigee) si connecte
+    ET consentant (verifie a nouveau dans corrections_mod, pas de confiance
+    aveugle ici) ET qu'un raw_json a ete fourni. N'a JAMAIS le droit de faire
+    echouer la validation/mise a jour du recu -- c'est une consequence
+    secondaire de la requete, pas son but."""
+    if not payload.raw_json:
+        return
+    user_id = _current_user(request)
+    if user_id is None:
+        return
+    corrected = {"items": payload.items, "subtotal": payload.subtotal, "tax": payload.tax,
+                "total": payload.total, "category": payload.category,
+                "merchant": _nan(payload.merchant)}
+    try:
+        corrections_mod.record_correction(user_id, receipt_id, payload.raw_json, corrected,
+                                          engine=payload.engine, country=payload.country)
+    except Exception:
+        logger.exception("Capture de correction échouée (non bloquant)")
 
 
 def build_receipt_bundle(receipt, country, payment_mode, merchant, category=None,
@@ -516,6 +573,10 @@ class ValidatePayload(BaseModel):
     account_overrides: dict | None = None  # {index_ligne_charge: compte} surcharge manuelle
     image_data: str | None = None       # miniature base64 du recu (affichage detail)
     persist: bool = True
+    raw_json: dict | None = None        # sortie brute du modele (renvoyee par /api/extract) :
+                                         # presente => capture d'une correction si l'utilisateur
+                                         # est connecte ET a consenti (voir _capture_correction)
+    engine: str | None = None           # donut / llm_fallback... (contexte de raw_json)
 
 
 @app.post("/api/validate")
@@ -554,6 +615,7 @@ def api_validate(payload: ValidatePayload, request: Request):
         bundle["demo_mode"] = session.demo_mode
     bundle["doc_type"] = payload.doc_type
     bundle["invoice_number"] = _nan(payload.invoice_number)
+    _capture_correction(request, payload, bundle.get("receipt_id"))
     return ok(bundle)
 
 
@@ -633,6 +695,7 @@ def api_receipt_update(receipt_id: int, payload: ValidatePayload, request: Reque
                    "account_overrides": overrides or {}, "updated": True,
                    "image_data": _nan(updated_row.get("image_data")) if updated_row else None,
                    "demo_mode": session.demo_mode})
+    _capture_correction(request, payload, receipt_id)
     return ok(bundle)
 
 
