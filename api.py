@@ -49,6 +49,7 @@ from src import db as db_mod
 from src import bilan as bilan_mod
 from src import import_ledger
 from src import jobs
+from src import rate_limit
 from src.models import Consent, Correction, LedgerEntry, User
 
 DATA = Path("data")
@@ -113,6 +114,14 @@ EVICTION_CHECK_INTERVAL_SECONDS = 10 * 60
 _last_eviction_check = 0.0
 
 
+def _rate_limit_bucket(path):
+    if path == "/api/extract":
+        return "extract"
+    if path == "/api/bilan/import":
+        return "bilan_import"
+    return "default"
+
+
 @app.middleware("http")
 async def ensure_session(request: Request, call_next):
     global _last_eviction_check
@@ -120,6 +129,25 @@ async def ensure_session(request: Request, call_next):
     if now - _last_eviction_check > EVICTION_CHECK_INTERVAL_SECONDS:
         _last_eviction_check = now
         session_store.evict_idle_sessions()
+
+    # Limitation de debit : uniquement sur /api/*, jamais sur le front statique.
+    # IP du client TCP direct (request.client.host, comme _is_local()) : PAS
+    # X-Forwarded-For, qui serait spoofable si on lui faisait confiance sans
+    # etre certain de tourner derriere un proxy de confiance qui l'ecrit lui-meme.
+    if request.url.path.startswith("/api"):
+        client_ip = request.client.host if request.client else "unknown"
+        bucket = _rate_limit_bucket(request.url.path)
+        allowed = rate_limit.check("default", client_ip)
+        if allowed and bucket != "default":
+            allowed = rate_limit.check(bucket, client_ip)
+        if not allowed:
+            return JSONResponse(to_jsonable({
+                "success": False,
+                "error": "Trop de requêtes.",
+                "detail": "Merci de réessayer dans une minute.",
+                "engine": "rate_limit",
+                "suggestions": ["Réessayer dans une minute"],
+            }), status_code=429)
 
     # header prioritaire (clients API / tests), sinon cookie, sinon nouvel id
     sid = request.headers.get("x-session-id") or request.cookies.get(SESSION_COOKIE)
