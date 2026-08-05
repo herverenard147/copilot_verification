@@ -234,7 +234,10 @@ tr.unbalanced > td:first-child { box-shadow: inset 3px 0 0 var(--warning); }
 .bars { display: flex; flex-direction: column; gap: var(--sm); }
 .bar-row { display: grid; grid-template-columns: 160px 1fr 90px; align-items: center; gap: var(--sm); font-size: 13px; }
 .bar-track { background: var(--surface-low); border-radius: 9999px; height: 14px; overflow: hidden; }
-.bar-fill { height: 100%; background: var(--primary-container); border-radius: 9999px; }
+/* display:block obligatoire : .bar-fill est un <span> (inline par defaut),
+   et "width" n'a AUCUN effet sur un element inline -- sans ça la barre reste
+   invisible quelle que soit la valeur calculee par barWidth(). */
+.bar-fill { display: block; height: 100%; background: var(--primary-container); border-radius: 9999px; }
 
 /* Loading (états d'extraction) */
 .loader { text-align: center; padding: var(--xl) var(--md); }
