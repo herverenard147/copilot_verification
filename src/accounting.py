@@ -26,6 +26,21 @@ CHART_OF_ACCOUNTS = {
     "401": "Fournisseurs",
     "571": "Caisse",
     "521": "Banques",
+    # Comptes de bilan (classes 1/2/3/4/7) : jamais produits par un recu
+    # d'achat seul (voir src/bilan.py), mais necessaires pour interpreter un
+    # import externe (src/import_ledger.py) ou une saisie manuelle -- capital,
+    # immobilisations, ventes... tout ce qu'un reçu ne peut pas fournir.
+    "101": "Capital",
+    "106": "Reserves",
+    "120": "Resultat de l'exercice",
+    "16": "Emprunts et dettes financieres",
+    "21": "Immobilisations corporelles",
+    "27": "Immobilisations financieres",
+    "31": "Stocks de marchandises",
+    "411": "Clients",
+    "4457": "TVA collectee",
+    "701": "Ventes de marchandises",
+    "706": "Prestations de services",
 }
 
 DEFAULT_EXPENSE_ACCOUNT = "638"   # compte fourre-tout quand la categorie ne correspond a rien
@@ -49,6 +64,38 @@ DEFAULT_CATEGORY_ACCOUNTS = {
 }
 
 PAYMENT_ACCOUNTS = {"cash": "571", "bank": "521", "credit": "401"}
+
+# Cote du bilan pour les comptes qui n'appartiennent clairement qu'a un seul
+# cote (necessaire pour les comptes de tiers, classe 4, qui melange creances
+# ET dettes selon le compte precis -- 401 fournisseur est une dette, 411
+# client est une creance, la classe seule ne suffit pas a trancher).
+ACCOUNT_SIDE = {
+    "101": "passif", "106": "passif", "120": "passif", "16": "passif",
+    "401": "passif", "4457": "passif",
+    "21": "actif", "27": "actif", "31": "actif",
+    "411": "actif", "4452": "actif", "521": "actif", "571": "actif",
+}
+
+
+def classify_account(account):
+    """Cote du bilan pour un compte : "actif", "passif", "resultat_charge"
+    (classe 6) ou "resultat_produit" (classe 7, alimente le resultat, jamais
+    directement une ligne du bilan). Compte connu -> ACCOUNT_SIDE (gere les
+    exceptions comme 401/411 en classe 4). Compte inconnu (import externe,
+    compte non repertorie) -> repli sur le 1er chiffre du numero, jamais un
+    echec : mieux vaut une classification prudente qu'un import qui plante."""
+    if account in ACCOUNT_SIDE:
+        return ACCOUNT_SIDE[account]
+    first = (str(account) or "")[:1]
+    if first == "1":
+        return "passif"
+    if first in ("2", "3", "5"):
+        return "actif"
+    if first == "6":
+        return "resultat_charge"
+    if first == "7":
+        return "resultat_produit"
+    return "actif"   # classe 4 inconnue ou compte non reconnu : creance par defaut
 
 
 def _normalize(text):

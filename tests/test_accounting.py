@@ -5,6 +5,7 @@ from src.receipt import Receipt
 from src.accounting import (
     journal_entry, is_balanced, vat_recoverable, map_category_to_account,
     vat_summary, CHART_OF_ACCOUNTS, PAYMENT_ACCOUNTS, DEFAULT_EXPENSE_ACCOUNT,
+    classify_account,
 )
 
 
@@ -179,3 +180,32 @@ def test_vat_summary_agrege_recuperable_et_motifs():
     assert summary["non_recoverable_total"] == 2000.0
     assert summary["non_recoverable_count"] == 1
     assert "Fournisseur non identifie — TVA non recuperable" in summary["non_recoverable_reasons"]
+
+
+@pytest.mark.parametrize("account,expected", [
+    ("101", "passif"),   # capital
+    ("120", "passif"),   # resultat
+    ("401", "passif"),   # fournisseurs (classe 4, exception)
+    ("4457", "passif"),  # TVA collectee (classe 4, exception)
+    ("21", "actif"),     # immobilisations
+    ("31", "actif"),     # stocks
+    ("411", "actif"),    # clients (classe 4, exception)
+    ("4452", "actif"),   # TVA recuperable (classe 4, exception)
+    ("571", "actif"),    # caisse
+    ("521", "actif"),    # banque
+    ("601", "resultat_charge"),
+    ("6181", "resultat_charge"),
+    ("701", "resultat_produit"),
+])
+def test_classify_account_comptes_connus(account, expected):
+    assert classify_account(account) == expected
+
+
+def test_classify_account_repli_par_classe_pour_compte_inconnu():
+    """Un compte non repertorie (ex. importe d'un fichier externe) est
+    classe par son 1er chiffre, jamais un echec."""
+    assert classify_account("2183") == "actif"      # classe 2 inconnue precise
+    assert classify_account("656") == "resultat_charge"
+    assert classify_account("758") == "resultat_produit"
+    assert classify_account("109999") == "passif"
+    assert classify_account("") == "actif"           # jamais de crash sur vide

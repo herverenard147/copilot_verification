@@ -45,7 +45,9 @@ from src import auth as auth_mod
 from src import corrections as corrections_mod
 from src import account_preferences as account_prefs_mod
 from src import db as db_mod
-from src.models import Consent, Correction, User
+from src import bilan as bilan_mod
+from src import import_ledger
+from src.models import Consent, Correction, LedgerEntry, User
 
 DATA = Path("data")
 WEB = Path("web")
@@ -437,9 +439,15 @@ def api_auth_export(request: Request):
                    .order_by(Consent.created_at).all())
         corrs = (s.query(Correction).filter_by(user_id=user_id)
                 .order_by(Correction.created_at).all())
+        ledger = (s.query(LedgerEntry).filter_by(user_id=user_id)
+                 .order_by(LedgerEntry.created_at).all())
         data = {
             "account": {"email": user.email, "created_at": user.created_at.isoformat()},
             "receipts": account_session.receipts,
+            "ledger_entries": [{"account": e.account, "label": e.label, "debit": e.debit,
+                               "credit": e.credit, "source": e.source,
+                               "imported_from": e.imported_from,
+                               "created_at": e.created_at.isoformat()} for e in ledger],
             "consents": [{"consent_type": c.consent_type, "granted": c.granted,
                          "created_at": c.created_at.isoformat()} for c in consents],
             "corrections": [{"receipt_id": c.receipt_id, "raw_json": c.raw_json,
@@ -875,9 +883,135 @@ def api_accounting(request: Request, period: str = "Mois en cours",
     session, error = _require_session(request)
     if error:
         return error
-    data = session.get_accounting_data(period, payment_mode, country)
+    data = session.get_accounting_data(period, payment_mode, country,
+                                       category_account_map=_category_account_map(request))
     data["demo_mode"] = session.demo_mode
     return ok(data)
+
+
+# ---------------------------------------------------------------------------
+# GET /api/bilan, POST /api/bilan/import, POST /api/bilan/entry,
+# DELETE /api/bilan/entries
+# ---------------------------------------------------------------------------
+def _receipt_journal_lines(session, payment_mode, country, category_account_map):
+    """Toutes les lignes de journal des reçus valides de la session, a plat
+    (le bilan porte sur l'ensemble des reçus, pas une periode -- voir
+    src/accounting.py:expense_report, "period" y est deja un simple libelle
+    d'affichage, jamais un filtre)."""
+    data = session.get_accounting_data("Bilan", payment_mode, country,
+                                       category_account_map=category_account_map)
+    if data.get("empty"):
+        return []
+    lines = []
+    for group in data["journal"]:
+        lines.extend(group["lines"])
+    return lines
+
+
+@app.get("/api/bilan")
+@safe
+def api_bilan(request: Request, payment_mode: str = "cash", country: str = "ID"):
+    """Bilan comptable (Actif/Passif) : lignes issues des reçus valides de la
+    session + écritures importées/manuelles du compte (LedgerEntry, si
+    connecté -- sinon uniquement ce que les reçus permettent de calculer)."""
+    session, error = _require_session(request)
+    if error:
+        return error
+    receipt_lines = _receipt_journal_lines(session, payment_mode, country,
+                                           _category_account_map(request))
+    user_id = _current_user(request)
+    ledger_entries = []
+    if user_id is not None:
+        with db_mod.get_db() as s:
+            rows = s.query(LedgerEntry).filter_by(user_id=user_id).all()
+            ledger_entries = [{"account": e.account, "debit": e.debit, "credit": e.credit}
+                              for e in rows]
+    result = bilan_mod.compute_bilan(receipt_lines, ledger_entries)
+    result["disclaimer"] = DISCLAIMER
+    result["has_imported_entries"] = bool(ledger_entries)
+    return ok(result)
+
+
+@app.post("/api/bilan/import")
+@safe
+def api_bilan_import(request: Request, file: UploadFile = File(...)):
+    """Import d'un fichier d'écritures/bilan externe (.xlsx/.csv/.docx) dans
+    le compte de l'utilisateur connecté -- alimente le bilan (LedgerEntry)."""
+    user_id, error = _require_user(request)
+    if error:
+        return error
+    try:
+        raw = file.file.read()
+    except Exception:
+        return fail("Fichier illisible.", status=422, engine="import")
+    if not raw:
+        return fail("Fichier vide.", status=422, engine="import")
+    try:
+        rows, parse_errors = import_ledger.parse_ledger_file(file.filename, raw)
+    except ValueError as exc:
+        return fail("Import impossible.", detail=str(exc), status=422, engine="import",
+                    suggestions=["Vérifier les colonnes (Compte, Libellé, Débit, Crédit)",
+                                 "Formats acceptés : .xlsx, .csv, .docx"])
+    if not rows:
+        return fail("Aucune ligne exploitable dans ce fichier.", status=422, engine="import",
+                    detail=f"{len(parse_errors)} ligne(s) ignorée(s).", extra={"errors": parse_errors})
+
+    total_debit = round(sum(r["debit"] for r in rows), 2)
+    total_credit = round(sum(r["credit"] for r in rows), 2)
+    with db_mod.get_db() as s:
+        for r in rows:
+            s.add(LedgerEntry(user_id=user_id, account=r["account"], label=r["label"],
+                              debit=r["debit"], credit=r["credit"],
+                              source="import", imported_from=file.filename))
+    return ok({
+        "imported": len(rows),
+        "skipped": len(parse_errors),
+        "errors": parse_errors,
+        "total_debit": total_debit,
+        "total_credit": total_credit,
+        "balanced": abs(total_debit - total_credit) <= 0.01,
+    })
+
+
+class LedgerEntryPayload(BaseModel):
+    account: str
+    label: str | None = None
+    debit: float = 0.0
+    credit: float = 0.0
+
+
+@app.post("/api/bilan/entry")
+@safe
+def api_bilan_entry_add(payload: LedgerEntryPayload, request: Request):
+    """Saisie manuelle d'une écriture de bilan (capital, immobilisation...)."""
+    user_id, error = _require_user(request)
+    if error:
+        return error
+    if not payload.account:
+        return fail("Compte requis.", status=422, engine="import")
+    if payload.debit == 0 and payload.credit == 0:
+        return fail("Débit et crédit ne peuvent pas être tous les deux à zéro.",
+                    status=422, engine="import")
+    with db_mod.get_db() as s:
+        entry = LedgerEntry(user_id=user_id, account=payload.account, label=payload.label,
+                            debit=payload.debit, credit=payload.credit, source="manual")
+        s.add(entry)
+        s.flush()
+        return ok({"id": entry.id})
+
+
+@app.delete("/api/bilan/entries")
+@safe
+def api_bilan_entries_clear(request: Request):
+    """Efface toutes les écritures importées/manuelles du compte (repartir
+    d'un bilan propre après un import raté, par ex.). Ne touche pas aux
+    reçus."""
+    user_id, error = _require_user(request)
+    if error:
+        return error
+    with db_mod.get_db() as s:
+        deleted = s.query(LedgerEntry).filter_by(user_id=user_id).delete()
+    return ok({"deleted": deleted})
 
 
 # ---------------------------------------------------------------------------

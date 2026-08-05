@@ -257,7 +257,7 @@ class UserSession:
         items = [it for it in self.items if int(it["receipt_id"]) == rid]
         return row, items
 
-    def get_accounting_data(self, period, payment_mode, country):
+    def get_accounting_data(self, period, payment_mode, country, category_account_map=None):
         receipts = self.receipts_df()
         if receipts.empty:
             return {"empty": True}
@@ -296,7 +296,8 @@ class UserSession:
             })
             try:
                 entry = journal_entry(r, category=_nan(row.get("category")),
-                                      payment_mode=payment_mode, country=country, merchant=merchant)
+                                      payment_mode=payment_mode, country=country, merchant=merchant,
+                                      category_account_map=category_account_map)
                 # surcharge manuelle des comptes (Tache 4) appliquee au journal
                 apply_account_overrides(entry, _nan(row.get("account_overrides")))
                 journal_groups.append({"receipt_id": rid,
