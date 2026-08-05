@@ -1,11 +1,12 @@
-"""Modele SQLAlchemy (src/db.py, src/models.py) : comptes, recus persistants,
-corrections, consentements. Base en memoire uniquement (jamais sur disque
-pendant les tests, meme discipline que test_persistence.py pour session_store)."""
+"""Modele SQLAlchemy (src/db.py, src/models.py) : comptes, corrections,
+consentements. Pas de Receipt ici (les recus vivent dans session_store.py,
+voir src/models.py). Base en memoire uniquement (jamais sur disque pendant
+les tests, meme discipline que test_persistence.py pour session_store)."""
 import pytest
 from sqlalchemy.exc import IntegrityError
 
 from src import db
-from src.models import Consent, Correction, Receipt, User
+from src.models import Consent, Correction, User
 
 
 @pytest.fixture(autouse=True)
@@ -52,15 +53,11 @@ def test_suppression_utilisateur_cascade():
         u = User(email="c@x.com", password_hash="h")
         s.add(u)
         s.flush()
-        s.add(Receipt(user_id=u.id, data={"total": 1000}))
-        s.flush()
-        r = s.query(Receipt).one()
-        s.add(Correction(user_id=u.id, receipt_id=r.id,
+        s.add(Correction(user_id=u.id, receipt_id=7,
                          raw_json={"total": 900}, corrected_json={"total": 1000}))
         s.add(Consent(user_id=u.id, consent_type="training_data", granted=True))
 
     with db.get_db() as s:
-        assert s.query(Receipt).count() == 1
         assert s.query(Correction).count() == 1
         assert s.query(Consent).count() == 1
 
@@ -69,27 +66,21 @@ def test_suppression_utilisateur_cascade():
         s.delete(u)
 
     with db.get_db() as s:
-        assert s.query(Receipt).count() == 0
         assert s.query(Correction).count() == 0
         assert s.query(Consent).count() == 0
 
 
 def test_correction_receipt_id_nest_pas_une_foreign_key():
     """receipt_id sur Correction reste un entier informatif (voir commentaire
-    du modele) : les recus valides vivent encore dans session_store, pas dans
-    la table receipts. Une correction doit donc pouvoir exister avec un
-    receipt_id qui ne correspond a AUCUNE ligne de la table receipts, et
-    survivre telle quelle a la suppression d'un Receipt de ce modele."""
+    du modele) : aucune contrainte d'integrite ne le relie a session_store,
+    ou il n'existe pas necessairement de recu portant ce numero -- ca ne doit
+    jamais empecher la creation d'une correction."""
     with db.get_db() as s:
         u = User(email="d@x.com", password_hash="h")
         s.add(u)
         s.flush()
-        s.add(Receipt(user_id=u.id, data={"total": 1}))
         s.add(Correction(user_id=u.id, receipt_id=4242,
                          raw_json={"total": 0}, corrected_json={"total": 1}))
-
-    with db.get_db() as s:
-        s.query(Receipt).delete()
 
     with db.get_db() as s:
         corr = s.query(Correction).one()

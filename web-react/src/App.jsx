@@ -6,25 +6,30 @@ import AnalyzeTab from "./components/AnalyzeTab.jsx";
 import DashboardTab from "./components/DashboardTab.jsx";
 import AccountingTab from "./components/AccountingTab.jsx";
 import AskTab from "./components/AskTab.jsx";
+import TechnicalTab from "./components/TechnicalTab.jsx";
 import SettingsPanel from "./components/SettingsPanel.jsx";
 import AuthGate from "./components/AuthGate.jsx";
 
+// app_mode vient du backend (/api/config, voir api.py APP_MODE) : une seule
+// instance = un seul mode, jamais un choix côté front. "demo" par défaut
+// tant que la config n'a pas encore chargé -- comportement le moins risqué
+// (accès libre, comme avant l'ajout du mode prod).
 const FALLBACK_CONFIG = {
   countries: { CI: 0.18, ID: 0.11 }, payment_modes: ["cash", "bank", "credit"],
-  chart_of_accounts: {}, groq_configured: false, disclaimer: "",
+  chart_of_accounts: {}, groq_configured: false, disclaimer: "", app_mode: "demo",
 };
 const COUNTRY_LABELS = { CI: "Côte d'Ivoire — TVA 18%", ID: "Indonésie — TVA 11%" };
 const PAYMENT_LABELS = { cash: "Espèces (caisse)", bank: "Virement bancaire", credit: "À crédit (fournisseur)" };
-// Onglet Technique volontairement absent de l'app "produit" (comparatif
-// Donut/baseline, courbe de perte — pertinent pour une soutenance, pas pour
-// un utilisateur final). Le composant existe toujours (TechnicalTab.jsx),
-// juste plus référencé ici.
-const TABS = [
+const BASE_TABS = [
   { id: "analyze", label: "Analyser" },
   { id: "dashboard", label: "Tableau de bord" },
   { id: "accounting", label: "Comptabilité" },
   { id: "ask", label: "Questions" },
 ];
+// Onglet Technique (comparatif Donut/baseline, courbe de perte) : utile pour
+// une démonstration/soutenance, pas pour un utilisateur du produit -- visible
+// seulement en mode demo.
+const TABS_WITH_TECHNICAL = [...BASE_TABS, { id: "technical", label: "Technique" }];
 
 export default function App() {
   const auth = useAuth();
@@ -82,14 +87,18 @@ export default function App() {
   }
 
   const cfg = config || FALLBACK_CONFIG;
+  const isProd = cfg.app_mode === "prod";
+  const tabs = isProd ? BASE_TABS : TABS_WITH_TECHNICAL;
 
-  // Connexion obligatoire : rien de l'app n'est accessible avant. Pendant la
-  // toute première vérification (auth.loading), on évite un flash de
-  // l'écran de connexion si l'utilisateur est en fait déjà authentifié.
-  if (auth.loading) {
+  // Connexion obligatoire seulement en mode prod. Tant que la config ou la
+  // vérification d'auth n'ont pas répondu, on affiche un écran vide plutôt
+  // que de risquer un flash (page de connexion, puis app, puis retour) --
+  // le mode par défaut (demo) n'exige rien, donc rien à décider tant qu'on
+  // ne sait pas encore dans quel mode on tourne.
+  if (auth.loading || config === null) {
     return <div style={{ minHeight: "100vh" }} />;
   }
-  if (!auth.isAuthenticated) {
+  if (isProd && !auth.isAuthenticated) {
     return <AuthGate auth={auth} />;
   }
 
@@ -98,7 +107,7 @@ export default function App() {
       <header className="app-header">
         <div className="brand">🧾 <span>ReceiptFlow</span></div>
         <nav className="nav">
-          {TABS.map((t) => (
+          {tabs.map((t) => (
             <button key={t.id} className={activeTab === t.id ? "active" : ""} onClick={() => setActiveTab(t.id)}>
               {t.label}
             </button>
@@ -161,6 +170,12 @@ export default function App() {
           <AskTab country={country} demoMode={sessionInfo.demoMode} sessionEmpty={sessionInfo.sessionEmpty}
             groqConfigured={!!cfg.groq_configured} onEditReceipt={handleEditReceipt} />
         </section>
+
+        {!isProd && (
+          <section className={activeTab === "technical" ? "" : "hidden"}>
+            <TechnicalTab />
+          </section>
+        )}
       </main>
 
       <div className={`overlay${settingsOpen ? " open" : ""}`} onClick={() => setSettingsOpen(false)}></div>
@@ -171,7 +186,7 @@ export default function App() {
         </div>
         <div className="section-body stack">
           <SettingsPanel config={config} onConfigChange={handleConfigChange}
-            demoInfo={sessionInfo} onSessionChange={handleSessionChange} auth={auth} />
+            demoInfo={sessionInfo} onSessionChange={handleSessionChange} auth={auth} isProd={isProd} />
         </div>
       </aside>
 

@@ -50,15 +50,27 @@ DATA = Path("data")
 WEB = Path("web")
 WEB_REACT_DIST = Path("web-react/dist")
 
+# Deux instances de l'app cohabitent : "demo" (accès libre, corpus CORD
+# activable, onglet Technique visible -- inchangé) et "prod" (connexion
+# obligatoire, chaque reçu rattaché au compte, pas de corpus de démo, pas
+# d'onglet Technique). Une seule base de code, le mode choisit le comportement.
+APP_MODE = os.environ.get("APP_MODE", "demo").strip().lower()
+if APP_MODE not in ("prod", "demo"):
+    APP_MODE = "demo"   # valeur inattendue -> comportement le moins risque
+
 # Persistance legere des sessions, HORS DEPOT (jamais data/*.csv). Activee au
 # demarrage d'un vrai serveur uniquement : TestClient (sans context manager)
 # ne declenche pas le lifespan -> aucune I/O disque pendant les tests.
-STATE_FILE = os.environ.get("COPILOTE_STATE_FILE", ".local_state/sessions.db")
+# Chemin par defaut deja specifique au mode -> deux instances (prod/demo)
+# lancees avec des APP_MODE differents ne partagent jamais de fichier, meme
+# sans configurer COPILOTE_STATE_FILE explicitement.
+STATE_FILE = os.environ.get("COPILOTE_STATE_FILE", f".local_state/sessions_{APP_MODE}.db")
 
 # Base comptes/corrections (src/models.py), fichier separe de sessions.db :
 # schema different, cycle de vie different (les comptes ne sont jamais purges
-# au vidage d'une session anonyme).
-AUTH_DB_FILE = os.environ.get("COPILOTE_AUTH_DB_FILE", ".local_state/app.db")
+# au vidage d'une session anonyme). Meme logique de chemin par defaut specifique
+# au mode.
+AUTH_DB_FILE = os.environ.get("COPILOTE_AUTH_DB_FILE", f".local_state/app_{APP_MODE}.db")
 
 # Cookies "secure" (HTTPS uniquement) : desactive par defaut pour le dev local
 # en http. A positionner a "true" via COOKIE_SECURE des que le service est
@@ -111,8 +123,35 @@ async def ensure_session(request: Request, call_next):
 
 
 def _session(request):
-    """La session utilisateur courante (creee a la volee si besoin)."""
+    """La session utilisateur courante (creee a la volee si besoin).
+
+    En mode demo : cookie de session anonyme, comportement historique
+    inchange (corpus CORD activable, pas de compte requis).
+
+    En mode prod : PAS d'acces anonyme. La session est clee sur le compte
+    (user_id) plutot que sur le cookie -- session_store.py etait deja prevu
+    pour ca ("AUTH FUTURE" dans son commentaire). Renvoie None si personne
+    n'est connecte ; l'appelant doit alors renvoyer une erreur (voir
+    _require_session)."""
+    if APP_MODE == "prod":
+        user_id = _current_user(request)
+        if user_id is None:
+            return None
+        return session_store.get_session(f"user:{user_id}", user_id=user_id)
     return session_store.get_session(request.state.sid)
+
+
+def _require_session(request):
+    """Comme _session(), mais renvoie une reponse d'erreur prete a l'emploi
+    si l'acces est refuse (mode prod sans connexion) -- meme forme que
+    _require_user, pour rester coherent avec le reste de l'API."""
+    session = _session(request)
+    if session is None:
+        return None, fail("Connexion requise.",
+                          detail="Cette instance nécessite un compte connecté.",
+                          status=401, engine="auth",
+                          suggestions=["Se connecter", "Créer un compte"])
+    return session, None
 
 
 def _current_user(request):
@@ -374,12 +413,14 @@ def api_auth_consent_get(request: Request, consent_type: str = "training_data"):
 @safe
 def api_auth_export(request: Request):
     """Droit a la portabilite (RGPD) : toutes les donnees personnelles
-    rattachees au compte, en JSON. Les recus valides de la session en cours
-    ne sont PAS encore inclus : ils vivent toujours dans session_store.py
-    (anonyme par cookie), pas rattaches a un compte -- migration a venir."""
+    rattachees au compte, en JSON -- y compris les reçus (session_store,
+    cle sur le compte en mode prod, voir _session()). En mode demo, les
+    reçus restent anonymes par session (jamais rattaches a un compte), donc
+    naturellement absents ici meme si le compte existe."""
     user_id, error = _require_user(request)
     if error:
         return error
+    account_session = session_store.get_session(f"user:{user_id}")
     with db_mod.get_db() as s:
         user = s.get(User, user_id)
         consents = (s.query(Consent).filter_by(user_id=user_id)
@@ -388,15 +429,16 @@ def api_auth_export(request: Request):
                 .order_by(Correction.created_at).all())
         data = {
             "account": {"email": user.email, "created_at": user.created_at.isoformat()},
+            "receipts": account_session.receipts,
             "consents": [{"consent_type": c.consent_type, "granted": c.granted,
                          "created_at": c.created_at.isoformat()} for c in consents],
             "corrections": [{"receipt_id": c.receipt_id, "raw_json": c.raw_json,
                             "corrected_json": c.corrected_json, "engine": c.engine,
                             "country": c.country, "created_at": c.created_at.isoformat()}
                            for c in corrs],
-            "note": ("Les reçus validés de votre session actuelle en cours ne sont pas "
-                     "encore rattachés à votre compte (migration en cours) : ils ne "
-                     "sont donc pas inclus dans cet export pour le moment."),
+            "note": ("« receipts » liste les reçus rattachés à votre compte (mode "
+                     "production uniquement). En mode démonstration, les reçus restent "
+                     "anonymes par session, jamais rattachés à un compte."),
         }
     return ok(data)
 
@@ -408,9 +450,11 @@ class DeleteAccountPayload(BaseModel):
 @app.delete("/api/auth/account")
 @safe
 def api_auth_delete_account(payload: DeleteAccountPayload, request: Request):
-    """Droit a l'effacement (RGPD) : supprime le compte, ce qui cascade sur
-    receipts/corrections/consents (voir src/models.py). Mot de passe requis
-    pour confirmer -- un cookie vole ne doit pas suffire a effacer un compte."""
+    """Droit a l'effacement (RGPD) : supprime le compte (cascade SQL sur
+    corrections/consents, voir src/models.py) ET les reçus rattaches au
+    compte dans session_store.py (pas couverts par la cascade SQL, table
+    differente -- purges explicitement ici). Mot de passe requis pour
+    confirmer -- un cookie vole ne doit pas suffire a effacer un compte."""
     user_id, error = _require_user(request)
     if error:
         return error
@@ -421,6 +465,7 @@ def api_auth_delete_account(payload: DeleteAccountPayload, request: Request):
         user = s.get(User, user_id)
         if user is not None:
             s.delete(user)
+    session_store.drop_session(f"user:{user_id}")
     response = ok({"deleted": True})
     response.delete_cookie(auth_mod.AUTH_COOKIE)
     return response
@@ -662,7 +707,9 @@ def api_validate(payload: ValidatePayload, request: Request):
     # Persistance = ajout aux depenses de CETTE session (memoire seule, jamais
     # sur disque : un correcteur qui clone n'herite pas des recus d'un autre).
     if payload.persist:
-        session = _session(request)
+        session, error = _require_session(request)
+        if error:
+            return error
         new_id = session.add_receipt(receipt, payload.category, bundle["audit"],
                                      merchant=_nan(payload.merchant), doc_type=payload.doc_type,
                                      invoice_number=_nan(payload.invoice_number),
@@ -684,7 +731,9 @@ def api_validate(payload: ValidatePayload, request: Request):
 @safe
 def api_dashboard(request: Request):
     # Donnees de CETTE session, PAS le corpus CORD de data/.
-    session = _session(request)
+    session, error = _require_session(request)
+    if error:
+        return error
     data = session.get_dashboard_data()
     data["demo_mode"] = session.demo_mode
     return ok(data)
@@ -696,7 +745,9 @@ def api_receipt(receipt_id: int, request: Request, country: str = "ID",
                 payment_mode: str = "cash"):
     """Detail complet d'un recu de la session : articles, montants, 4 controles,
     ecriture comptable. Reutilise build_receipt_bundle (aucune logique dupliquee)."""
-    session = _session(request)
+    session, error = _require_session(request)
+    if error:
+        return error
     row, items = session.get_receipt(receipt_id)
     if row is None:
         return fail("Reçu introuvable.",
@@ -729,7 +780,9 @@ def api_receipt(receipt_id: int, request: Request, country: str = "ID",
 def api_receipt_update(receipt_id: int, payload: ValidatePayload, request: Request):
     """Modifie un recu deja valide (Tache 2). Recalcule audit + ecriture via
     build_receipt_bundle, puis remplace le recu dans la session."""
-    session = _session(request)
+    session, error = _require_session(request)
+    if error:
+        return error
     row, _ = session.get_receipt(receipt_id)
     if row is None:
         return fail("Reçu introuvable.", detail="Ce reçu n'existe pas dans votre session.",
@@ -761,7 +814,9 @@ def api_receipt_update(receipt_id: int, payload: ValidatePayload, request: Reque
 @safe
 def api_receipt_delete(receipt_id: int, request: Request):
     """Supprime un recu valide (Tache 2) : disparait de toutes les vues."""
-    session = _session(request)
+    session, error = _require_session(request)
+    if error:
+        return error
     if not session.delete_receipt(receipt_id):
         return fail("Reçu introuvable.", detail="Ce reçu n'existe pas dans votre session.",
                     status=404, engine="session", suggestions=["Revenir au tableau de bord"])
@@ -776,7 +831,9 @@ def api_receipt_delete(receipt_id: int, request: Request):
 def api_accounting(request: Request, period: str = "Mois en cours",
                    payment_mode: str = "cash", country: str = "ID"):
     # Comptabilise les recus de CETTE session, PAS le corpus CORD.
-    session = _session(request)
+    session, error = _require_session(request)
+    if error:
+        return error
     data = session.get_accounting_data(period, payment_mode, country)
     data["demo_mode"] = session.demo_mode
     return ok(data)
@@ -805,7 +862,9 @@ def api_search(payload: SearchPayload, request: Request):
                    "(FAISS / sentence-transformers non installés)."})
 
     from src.semantic import search, build_index, embed
-    session = _session(request)
+    session, error = _require_session(request)
+    if error:
+        return error
 
     if session.demo_mode:
         # Le mode demo EST le corpus CORD : on reutilise l'index precalcule.
@@ -863,7 +922,9 @@ def api_search(payload: SearchPayload, request: Request):
 def api_session(request: Request):
     """Etat de la session courante : mode demo + nombre de reçus. Le front
     s'en sert pour afficher (ou non) le bandeau de démonstration."""
-    session = _session(request)
+    session, error = _require_session(request)
+    if error:
+        return error
     return ok({"demo_mode": session.demo_mode,
                "n_receipts": len(session.receipts),
                "empty": session.is_empty()})
@@ -873,7 +934,9 @@ def api_session(request: Request):
 @safe
 def api_session_clear(request: Request):
     """Vide les données de la session (reçus + mode démo)."""
-    session = _session(request)
+    session, error = _require_session(request)
+    if error:
+        return error
     session.clear()
     return ok({"demo_mode": False, "n_receipts": 0, "empty": True})
 
@@ -888,8 +951,17 @@ def api_settings_demo(payload: DemoPayload, request: Request):
     """MODE DÉMONSTRATION : peuple la session avec le corpus CORD (pour montrer
     un tableau de bord rempli en soutenance) ou le vide. Toujours signalé,
     jamais silencieux -- la réponse porte demo_mode que le front affiche en
-    bandeau permanent."""
-    session = _session(request)
+    bandeau permanent.
+
+    Indisponible en mode prod : un vrai compte ne doit jamais pouvoir charger
+    le corpus de démonstration dans ses données (voir APP_MODE)."""
+    if APP_MODE == "prod":
+        return fail("Le mode démonstration n'est pas disponible sur cette instance.",
+                    status=403, engine="config",
+                    suggestions=["Analyser un reçu réel"])
+    session, error = _require_session(request)
+    if error:
+        return error
     if payload.enabled:
         receipts, items = reference_dataset()
         session.load_demo(receipts, items)
@@ -934,6 +1006,7 @@ def api_config():
         "groq_configured": groq != "none",
         "groq_source": groq,
         "disclaimer": DISCLAIMER,
+        "app_mode": APP_MODE,
     })
 
 

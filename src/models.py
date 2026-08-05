@@ -1,16 +1,20 @@
-"""Modeles SQLAlchemy : comptes utilisateurs, recus persistants, corrections
-(apprentissage par correction humaine) et consentements RGPD.
+"""Modeles SQLAlchemy : comptes utilisateurs, corrections (apprentissage par
+correction humaine) et consentements RGPD.
 
-Separe de src/session_store.py (sessions anonymes historiques, encore en
-service) le temps de la migration vers de vrais comptes -- voir la TaskList
-du chantier "users-db-corrections". Une fois l'authentification cablee dans
-api.py, les recus migreront de session_store vers ces modeles.
+Pas de modele Receipt ici : les recus valides vivent dans
+src/session_store.py, qui etait deja concu pour etre rattache a un compte
+(get_session(session_id, user_id=None), voir son commentaire "AUTH FUTURE").
+En mode APP_MODE=prod, api.py cle la session sur l'identifiant du compte au
+lieu du cookie anonyme -- ca reutilise tout le calcul (dashboard, TVA,
+anomalies) deja teste, sans dupliquer la logique dans un second systeme de
+persistance.
 
-Suppression en cascade : supprimer un User supprime ses receipts, corrections
-et consents (droit a l'effacement RGPD). Declare a la fois cote ORM
+Suppression en cascade : supprimer un User supprime ses corrections et
+consents (droit a l'effacement RGPD). Declare a la fois cote ORM
 (cascade="all, delete-orphan") et cote base (ondelete="CASCADE") -- SQLite
 n'applique le ondelete que si les foreign keys sont activees par connexion
-(voir src/db.py, PRAGMA foreign_keys=ON).
+(voir src/db.py, PRAGMA foreign_keys=ON). Les reçus de session_store sont
+purges separement (session_store.drop_session), voir api.py.
 """
 from datetime import datetime, timezone
 
@@ -35,29 +39,10 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow, nullable=False)
 
-    receipts: Mapped[list["Receipt"]] = relationship(
-        back_populates="user", cascade="all, delete-orphan")
     corrections: Mapped[list["Correction"]] = relationship(
         back_populates="user", cascade="all, delete-orphan")
     consents: Mapped[list["Consent"]] = relationship(
         back_populates="user", cascade="all, delete-orphan")
-
-
-class Receipt(Base):
-    """Recu valide, rattache a un compte (remplace a terme la persistance
-    anonyme par cookie de src/session_store.py)."""
-    __tablename__ = "receipts"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    data: Mapped[dict] = mapped_column(JSON, nullable=False)  # {"receipt": {...}, "items": [...]}
-    doc_type: Mapped[str | None] = mapped_column(String(20))
-    invoice_number: Mapped[str | None] = mapped_column(String(100))
-    created_at: Mapped[datetime] = mapped_column(default=_utcnow, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow, nullable=False)
-
-    user: Mapped["User"] = relationship(back_populates="receipts")
 
 
 class Correction(Base):
@@ -74,10 +59,10 @@ class Correction(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    # PAS une foreign key vers receipts.id : les recus valides vivent encore
-    # dans src/session_store.py (numerotation par session, pas migree vers
-    # ce modele -- voir la TaskList). C'est un identifiant informatif dans
-    # cet espace-la, pour retrouver le contexte, pas une contrainte d'integrite.
+    # PAS une foreign key : les recus valides vivent dans src/session_store.py
+    # (numerotation par session/compte, pas dans une table SQL de ce module).
+    # Identifiant informatif pour retrouver le contexte, pas une contrainte
+    # d'integrite referentielle.
     receipt_id: Mapped[int | None] = mapped_column(Integer)
     raw_json: Mapped[dict] = mapped_column(JSON, nullable=False)        # sortie brute du modele
     corrected_json: Mapped[dict] = mapped_column(JSON, nullable=False)  # valeurs validees par l'humain

@@ -156,7 +156,7 @@ function DemoSection({ demoInfo, onSessionChange }) {
   );
 }
 
-export default function SettingsPanel({ config, onConfigChange, demoInfo, onSessionChange, auth }) {
+export default function SettingsPanel({ config, onConfigChange, demoInfo, onSessionChange, auth, isProd }) {
   if (!config) return null;
   const taxes = Object.entries(config.countries || {});
   const accounts = Object.entries(config.chart_of_accounts || {});
@@ -172,7 +172,8 @@ export default function SettingsPanel({ config, onConfigChange, demoInfo, onSess
       </div>
 
       <ApiKeySection onConfigChange={onConfigChange} />
-      <DemoSection demoInfo={demoInfo} onSessionChange={onSessionChange} />
+      {/* Corpus de démonstration indisponible en prod (voir APP_MODE côté serveur) */}
+      {!isProd && <DemoSection demoInfo={demoInfo} onSessionChange={onSessionChange} />}
 
       <div className="card"><div className="section-head"><span className="label-caps">Plan de comptes (SYSCOHADA)</span></div>
         <table><thead><tr><th>Compte</th><th>Libellé</th></tr></thead>
