@@ -44,6 +44,7 @@ from src import session_store
 from src import auth as auth_mod
 from src import corrections as corrections_mod
 from src import db as db_mod
+from src.models import Consent, Correction, User
 
 DATA = Path("data")
 WEB = Path("web")
@@ -366,6 +367,62 @@ def api_auth_consent_get(request: Request, consent_type: str = "training_data"):
         return error
     return ok({"consent_type": consent_type,
               "granted": corrections_mod.has_consent(user_id, consent_type)})
+
+
+@app.get("/api/auth/export")
+@safe
+def api_auth_export(request: Request):
+    """Droit a la portabilite (RGPD) : toutes les donnees personnelles
+    rattachees au compte, en JSON. Les recus valides de la session en cours
+    ne sont PAS encore inclus : ils vivent toujours dans session_store.py
+    (anonyme par cookie), pas rattaches a un compte -- migration a venir."""
+    user_id, error = _require_user(request)
+    if error:
+        return error
+    with db_mod.get_db() as s:
+        user = s.get(User, user_id)
+        consents = (s.query(Consent).filter_by(user_id=user_id)
+                   .order_by(Consent.created_at).all())
+        corrs = (s.query(Correction).filter_by(user_id=user_id)
+                .order_by(Correction.created_at).all())
+        data = {
+            "account": {"email": user.email, "created_at": user.created_at.isoformat()},
+            "consents": [{"consent_type": c.consent_type, "granted": c.granted,
+                         "created_at": c.created_at.isoformat()} for c in consents],
+            "corrections": [{"receipt_id": c.receipt_id, "raw_json": c.raw_json,
+                            "corrected_json": c.corrected_json, "engine": c.engine,
+                            "country": c.country, "created_at": c.created_at.isoformat()}
+                           for c in corrs],
+            "note": ("Les reçus validés de votre session actuelle en cours ne sont pas "
+                     "encore rattachés à votre compte (migration en cours) : ils ne "
+                     "sont donc pas inclus dans cet export pour le moment."),
+        }
+    return ok(data)
+
+
+class DeleteAccountPayload(BaseModel):
+    password: str
+
+
+@app.delete("/api/auth/account")
+@safe
+def api_auth_delete_account(payload: DeleteAccountPayload, request: Request):
+    """Droit a l'effacement (RGPD) : supprime le compte, ce qui cascade sur
+    receipts/corrections/consents (voir src/models.py). Mot de passe requis
+    pour confirmer -- un cookie vole ne doit pas suffire a effacer un compte."""
+    user_id, error = _require_user(request)
+    if error:
+        return error
+    if not auth_mod.verify_user_password(user_id, payload.password):
+        return fail("Mot de passe incorrect.", status=401, engine="auth",
+                    suggestions=["Vérifier le mot de passe"])
+    with db_mod.get_db() as s:
+        user = s.get(User, user_id)
+        if user is not None:
+            s.delete(user)
+    response = ok({"deleted": True})
+    response.delete_cookie(auth_mod.AUTH_COOKIE)
+    return response
 
 
 def _nan(value):

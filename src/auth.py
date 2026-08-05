@@ -63,6 +63,17 @@ def verify_password(plain, hashed):
         return False
 
 
+def verify_user_password(user_id, password):
+    """Reverifie le mot de passe d'un compte deja identifie (ex. confirmation
+    avant suppression de compte) -- pas une connexion, pas d'anti brute-force
+    ici (l'utilisateur est deja authentifie par son cookie de session)."""
+    with get_db() as s:
+        user = s.get(User, user_id)
+        if user is None or not user.is_active:
+            return False
+        return verify_password(password, user.password_hash)
+
+
 def register_user(email, password):
     """Cree un compte. Leve ValueError (email invalide, deja pris, mot de
     passe trop court) plutot qu'une exception SQL brute -- message utilisable
