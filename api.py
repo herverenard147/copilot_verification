@@ -822,7 +822,10 @@ def _run_extraction_job(pre_img, pre_info, country, payment_mode, merchant, doc_
         "invoice_number": invoice_number,
         "image_data": image_data,
     })
-    return bundle
+    # to_jsonable() ici, pas seulement dans ok() : le resultat doit deja etre
+    # JSON-safe pour que src/jobs.py puisse le serialiser tel quel dans Redis
+    # (partage entre instances) sans avoir a connaitre ce module.
+    return to_jsonable(bundle)
 
 
 @app.get("/api/extract/status/{job_id}")
