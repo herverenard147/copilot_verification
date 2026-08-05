@@ -14,6 +14,7 @@ import logging
 import math
 import os
 import re
+import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -104,9 +105,22 @@ app = FastAPI(title="Copilote de reçus — API", lifespan=_lifespan)
 # ---------------------------------------------------------------------------
 SESSION_COOKIE = "sid"
 
+# Purge des sessions abandonnees (voir session_store.evict_idle_sessions) :
+# declenchee ici plutot que par un thread dedie, throttlee pour rester
+# gratuite (un coup d'oeil a une horloge la plupart du temps, un vrai scan
+# seulement toutes les EVICTION_CHECK_INTERVAL_SECONDS).
+EVICTION_CHECK_INTERVAL_SECONDS = 10 * 60
+_last_eviction_check = 0.0
+
 
 @app.middleware("http")
 async def ensure_session(request: Request, call_next):
+    global _last_eviction_check
+    now = time.time()
+    if now - _last_eviction_check > EVICTION_CHECK_INTERVAL_SECONDS:
+        _last_eviction_check = now
+        session_store.evict_idle_sessions()
+
     # header prioritaire (clients API / tests), sinon cookie, sinon nouvel id
     sid = request.headers.get("x-session-id") or request.cookies.get(SESSION_COOKIE)
     fresh = None

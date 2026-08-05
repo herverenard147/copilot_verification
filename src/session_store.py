@@ -21,6 +21,7 @@ aucune I/O disque -- comportement historique.
 """
 import json
 import math
+import time
 
 import numpy as np
 import pandas as pd
@@ -80,6 +81,7 @@ class UserSession:
         self.items = []                  # list[dict], schema ITEM_COLUMNS
         self.demo_mode = False
         self._next_id = 0
+        self.last_accessed = time.time()  # voir evict_idle_sessions()
 
     # -- etat -----------------------------------------------------------------
     def is_empty(self):
@@ -334,6 +336,11 @@ class UserSession:
 # ---------------------------------------------------------------------------
 _sessions = {}   # session_id -> UserSession
 
+# Purge des sessions inactives (fuite memoire sinon : _sessions ne retirait
+# jamais rien tant que le process tournait). TTL genereux (24h) : c'est un
+# frein, pas une politique de retention agressive.
+IDLE_TTL_SECONDS = 24 * 60 * 60
+
 
 def get_session(session_id, user_id=None):
     """Recupere (ou cree) la session. AUTH FUTURE : quand un user_id existera,
@@ -343,7 +350,25 @@ def get_session(session_id, user_id=None):
     if session is None:
         session = UserSession(session_id, user_id=user_id)
         _sessions[session_id] = session
+    session.last_accessed = time.time()
     return session
+
+
+def evict_idle_sessions(ttl_seconds=IDLE_TTL_SECONDS):
+    """Retire du registre EN MEMOIRE les sessions inactives depuis plus de
+    ttl_seconds -- MAIS SEULEMENT si les perdre ne coute rien : mode demo
+    (jamais persiste, un clic recharge le corpus) ou session vide (rien a
+    perdre). Une session avec de vrais reçus persistes n'est JAMAIS evincee
+    ici : il n'existe pas (encore) de mecanisme pour la recharger a la demande
+    depuis la base si elle redevient active -- l'evincer perdrait des
+    donnees visibles par l'utilisateur tant que ce mecanisme n'existe pas.
+    Renvoie le nombre de sessions evincees."""
+    now = time.time()
+    to_evict = [sid for sid, s in _sessions.items()
+               if (now - s.last_accessed) > ttl_seconds and (s.demo_mode or s.is_empty())]
+    for sid in to_evict:
+        del _sessions[sid]
+    return len(to_evict)
 
 
 def drop_session(session_id):
