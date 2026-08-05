@@ -6,6 +6,7 @@ les cas d'erreur (image invalide, fichier vide, PDF renomme) s'arretent AVANT
 Donut de toute facon."""
 import io
 import pathlib
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,12 +14,43 @@ from PIL import Image
 
 import api
 import src.llm as llm
-from src import session_store
+from src import jobs, session_store
 from src.llm import VisionUnavailable
 
 # raise_server_exceptions=False : si une erreur passait entre les mailles, le
 # test verrait la reponse (jamais une exception) -- c'est justement ce qu'on garantit.
 client = TestClient(api.app, raise_server_exceptions=False)
+
+
+def _extract(files, data=None, headers=None, timeout=5):
+    """POST /api/extract soumet maintenant une tache de fond (voir src/jobs.py)
+    au lieu de repondre directement -- ce helper soumet PUIS interroge
+    /api/extract/status/{job_id} jusqu'a resolution, et renvoie la reponse
+    finale (memes assertions qu'avant le decouplage pour l'appelant). Un
+    rejet AVANT la soumission (fichier vide, resolution trop basse...) revient
+    directement, sans job -- gere naturellement (status_code != 200)."""
+    r = client.post("/api/extract", files=files, data=data or {}, headers=headers or {})
+    if r.status_code != 200:
+        return r
+    job_id = r.json().get("job_id")
+    if not job_id:
+        return r
+    deadline = time.time() + timeout
+    status_headers = headers or {}
+    last = None
+    while time.time() < deadline:
+        last = client.get(f"/api/extract/status/{job_id}", headers=status_headers)
+        if last.json().get("status") not in ("pending", "running"):
+            return last
+        time.sleep(0.01)
+    return last
+
+
+@pytest.fixture(autouse=True)
+def _reset_jobs():
+    jobs.reset_all()
+    yield
+    jobs.reset_all()
 
 VALID_KEY = "gsk_test_key_1234567890"     # forme plausible, jamais envoyee a Groq
 
@@ -65,8 +97,8 @@ _FACTURE_MENU = {"menu": [
 def test_extract_mode_facture_filtre_les_entetes(monkeypatch):
     monkeypatch.setattr(api, "get_donut", lambda: (None, None, "cpu"))
     monkeypatch.setattr(api, "extract", lambda *a, **k: _FACTURE_MENU)
-    r = client.post("/api/extract", files={"file": ("f.png", png_bytes(), "image/png")},
-                    data={"country": "ID", "doc_type": "facture"}, headers={"X-Session-Id": "fac"})
+    r = _extract(files={"file": ("f.png", png_bytes(), "image/png")},
+                 data={"country": "ID", "doc_type": "facture"}, headers={"X-Session-Id": "fac"})
     assert r.status_code == 200
     body = r.json()
     names = [it["name"] for it in body["receipt"]["items"]]
@@ -80,8 +112,8 @@ def test_extract_mode_ticket_ne_change_rien(monkeypatch):
     """Mode ticket = comportement identique à avant : aucun item retiré."""
     monkeypatch.setattr(api, "get_donut", lambda: (None, None, "cpu"))
     monkeypatch.setattr(api, "extract", lambda *a, **k: _FACTURE_MENU)
-    r = client.post("/api/extract", files={"file": ("f.png", png_bytes(), "image/png")},
-                    data={"country": "ID", "doc_type": "ticket"}, headers={"X-Session-Id": "tic"})
+    r = _extract(files={"file": ("f.png", png_bytes(), "image/png")},
+                 data={"country": "ID", "doc_type": "ticket"}, headers={"X-Session-Id": "tic"})
     body = r.json()
     names = [it["name"] for it in body["receipt"]["items"]]
     assert "CELIA NAUDIN" in names and len(names) == 9   # TOUS conservés
@@ -91,16 +123,16 @@ def test_extract_mode_ticket_ne_change_rien(monkeypatch):
 def test_extract_facture_trouve_le_numero(monkeypatch):
     monkeypatch.setattr(api, "get_donut", lambda: (None, None, "cpu"))
     monkeypatch.setattr(api, "extract", lambda *a, **k: _FACTURE_MENU)
-    r = client.post("/api/extract", files={"file": ("f.png", png_bytes(), "image/png")},
-                    data={"country": "ID", "doc_type": "facture"}, headers={"X-Session-Id": "num"})
+    r = _extract(files={"file": ("f.png", png_bytes(), "image/png")},
+                 data={"country": "ID", "doc_type": "facture"}, headers={"X-Session-Id": "num"})
     assert r.json()["invoice_number"] == "12345"
 
 
 def test_extract_ticket_ne_cherche_pas_de_numero(monkeypatch):
     monkeypatch.setattr(api, "get_donut", lambda: (None, None, "cpu"))
     monkeypatch.setattr(api, "extract", lambda *a, **k: _FACTURE_MENU)
-    r = client.post("/api/extract", files={"file": ("f.png", png_bytes(), "image/png")},
-                    data={"country": "ID", "doc_type": "ticket"}, headers={"X-Session-Id": "tic2"})
+    r = _extract(files={"file": ("f.png", png_bytes(), "image/png")},
+                 data={"country": "ID", "doc_type": "ticket"}, headers={"X-Session-Id": "tic2"})
     assert r.json()["invoice_number"] is None
 
 
@@ -172,8 +204,8 @@ def test_extract_renvoie_une_miniature_redimensionnee(monkeypatch):
     monkeypatch.setattr(api, "get_donut", lambda: (None, None, "cpu"))
     monkeypatch.setattr(api, "extract",
                         lambda *a, **k: {"menu": [{"nm": "X", "price": "1000"}], "total": {"total_price": "1000"}})
-    r = client.post("/api/extract", files={"file": ("r.png", png_bytes((2000, 1500)), "image/png")},
-                    data={"country": "ID"}, headers={"X-Session-Id": "img"})
+    r = _extract(files={"file": ("r.png", png_bytes((2000, 1500)), "image/png")},
+                 data={"country": "ID"}, headers={"X-Session-Id": "img"})
     b = r.json()
     assert b["image_data"].startswith("data:image/jpeg;base64,")
     import base64
@@ -225,9 +257,8 @@ def test_extract_image_valide_200(monkeypatch):
     monkeypatch.setattr(api, "extract",
                         lambda *a, **k: {"menu": [{"nm": "Article", "price": "1000"}],
                                           "total": {"total_price": "1000"}})
-    r = client.post("/api/extract",
-                    files={"file": ("recu.png", png_bytes(), "image/png")},
-                    data={"country": "ID", "payment_mode": "cash"})
+    r = _extract(files={"file": ("recu.png", png_bytes(), "image/png")},
+                 data={"country": "ID", "payment_mode": "cash"})
     assert r.status_code == 200
     body = r.json()
     assert body["success"] is True
@@ -261,9 +292,8 @@ def test_extract_image_modeste_non_bloquee(monkeypatch):
     monkeypatch.setattr(api, "extract",
                         lambda *a, **k: {"menu": [{"nm": "Article", "price": "1000"}],
                                           "total": {"total_price": "1000"}})
-    r = client.post("/api/extract",
-                    files={"file": ("recu.png", png_bytes((800, 600)), "image/png")},
-                    data={"country": "ID"})
+    r = _extract(files={"file": ("recu.png", png_bytes((800, 600)), "image/png")},
+                 data={"country": "ID"})
     assert r.status_code == 200 and r.json()["success"] is True
 
 
@@ -526,10 +556,9 @@ def test_extract_sans_modele_vision_ne_plante_pas(monkeypatch):
         raise VisionUnavailable("aucun modele vision accessible")
     monkeypatch.setattr(api, "extract_receipt_via_vision", _no_vision)
 
-    r = client.post("/api/extract",
-                    files={"file": ("recu.png", png_bytes(), "image/png")},
-                    data={"country": "CI", "payment_mode": "cash"},
-                    headers={"X-Session-Id": "vision"})
+    r = _extract(files={"file": ("recu.png", png_bytes(), "image/png")},
+                 data={"country": "CI", "payment_mode": "cash"},
+                 headers={"X-Session-Id": "vision"})
     assert r.status_code == 200
     body = r.json()
     assert body["success"] is True

@@ -20,6 +20,7 @@ export default function AnalyzeTab({ country, payment, docType, config, pendingE
   const [file, setFile] = useState(null);
   const [phase, setPhase] = useState("empty"); // empty | loading | error | result
   const [stepIndex, setStepIndex] = useState(0);
+  const [jobStatus, setJobStatus] = useState(null); // "pending" | "running" (statut réel du serveur)
   const [error, setError] = useState(null);
   const [extracted, setExtracted] = useState(null); // dernière réponse /api/extract ou /api/receipt (chargée pour édition)
   const [editingId, setEditingId] = useState(null);
@@ -51,11 +52,15 @@ export default function AnalyzeTab({ country, payment, docType, config, pendingE
   }, [pendingEdit, onConsumeEdit]);
 
   useEffect(() => {
-    if (phase !== "loading") return;
+    // L'animation des étapes n'avance que pendant "running" (le calcul a
+    // réellement commencé côté serveur) : si une autre extraction est en
+    // cours, ce job reste "pending" et l'affichage le dit honnêtement,
+    // plutôt que de faire semblant d'avancer pendant une vraie attente.
+    if (phase !== "loading" || jobStatus !== "running") return;
     setStepIndex(0);
     const t = setInterval(() => setStepIndex((i) => Math.min(i + 1, STEPS.length - 1)), 4000);
     return () => clearInterval(t);
-  }, [phase]);
+  }, [phase, jobStatus]);
 
   function reset() {
     setFile(null); setExtracted(null); setEditingId(null); setAccountOverrides({});
@@ -65,9 +70,12 @@ export default function AnalyzeTab({ country, payment, docType, config, pendingE
 
   async function handleFile(f) {
     setFile(f); setEditingId(null); setAccountOverrides({});
-    setPhase("loading"); setError(null);
+    setPhase("loading"); setError(null); setJobStatus("pending");
     try {
-      const data = await API.extract(f, country, payment, docType);
+      // L'extraction Donut (30-60s) tourne en tâche de fond côté serveur
+      // (voir src/jobs.py) : on soumet puis on interroge le statut réel
+      // jusqu'au résultat, plutôt que d'attendre une seule grosse réponse.
+      const data = await API.extractAndWait(f, country, payment, docType, setJobStatus);
       setExtracted(data);
       setItems(data.receipt.items && data.receipt.items.length ? data.receipt.items : [emptyItem()]);
       setSubtotal(data.receipt.subtotal ?? "");
@@ -196,7 +204,11 @@ export default function AnalyzeTab({ country, payment, docType, config, pendingE
       <div className="card"><div className="loader">
         <div className="spinner"></div>
         <p className="headline-sm">Analyse du reçu en cours…</p>
-        <p className="muted">L'inférence tourne sur le processeur : comptez <b>30 à 60 secondes</b>. Ne fermez pas la page.</p>
+        {jobStatus === "pending" ? (
+          <p className="muted">⏳ En file d'attente — une autre analyse est en cours, la vôtre commencera juste après.</p>
+        ) : (
+          <p className="muted">L'inférence tourne sur le processeur : comptez <b>30 à 60 secondes</b>. Ne fermez pas la page.</p>
+        )}
         <ul className="steps">
           {STEPS.map((s, i) => (
             <li key={i} className={i < stepIndex ? "done" : i === stepIndex ? "active" : ""}>{s}</li>

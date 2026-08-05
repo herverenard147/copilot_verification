@@ -51,12 +51,29 @@ const API = {
   config: () => getJSON('/api/config'),
 
   async extract(file, country, paymentMode, docType) {
+    // Soumet une extraction : renvoie {job_id, status:"pending"} immédiatement
+    // (le calcul Donut, 30-60s, tourne en tâche de fond côté serveur -- voir
+    // src/jobs.py). Utiliser extractStatus() pour suivre, ou extractAndWait()
+    // pour le cas courant (attendre le résultat final).
     const form = new FormData();
     form.append('file', file);
     form.append('country', country);
     form.append('payment_mode', paymentMode);
     form.append('doc_type', docType || 'ticket');
     return _json(await fetch('/api/extract', { method: 'POST', credentials: 'include', body: form }));
+  },
+
+  extractStatus: (jobId) => getJSON('/api/extract/status/' + encodeURIComponent(jobId)),
+
+  async extractAndWait(file, country, paymentMode, docType, onStatus) {
+    const submitted = await API.extract(file, country, paymentMode, docType);
+    const jobId = submitted.job_id;
+    for (;;) {
+      const s = await API.extractStatus(jobId);
+      if (onStatus) onStatus(s.status);
+      if (s.status !== 'pending' && s.status !== 'running') return s;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
   },
 
   validate: (payload) => postJSON('/api/validate', payload),

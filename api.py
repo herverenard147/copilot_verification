@@ -47,6 +47,7 @@ from src import account_preferences as account_prefs_mod
 from src import db as db_mod
 from src import bilan as bilan_mod
 from src import import_ledger
+from src import jobs
 from src.models import Consent, Correction, LedgerEntry, User
 
 DATA = Path("data")
@@ -693,6 +694,31 @@ def api_extract(request: Request, file: UploadFile = File(...), country: str = F
     except Exception:
         pre_img, pre_info = image.convert("RGB"), {"deskewed": False, "clahe": False}
 
+    # Miniature (~800px) de l'image d'origine, pour l'AFFICHER plus tard dans le
+    # détail. Encodée en base64 ; le front la renvoie à la validation pour la
+    # stocker avec le reçu. Jamais la pleine résolution (poids maîtrisé).
+    try:
+        image_data = image_to_thumbnail_datauri(image)
+    except Exception:
+        image_data = None
+
+    # A partir d'ici, le travail est LONG (inference Donut : 30-60s CPU) :
+    # soumis en tache de fond (voir src/jobs.py) plutot que bloquant la
+    # requete. Tout ce qui precede (lecture, image, resolution) reste
+    # synchrone : ce sont des controles rapides, l'erreur doit etre immediate.
+    category_account_map = _category_account_map(request)
+    job_id = jobs.submit(_run_extraction_job, pre_img, pre_info, country, payment_mode,
+                         merchant, doc_type, category_account_map, image_data)
+    return ok({"job_id": job_id, "status": "pending"})
+
+
+def _run_extraction_job(pre_img, pre_info, country, payment_mode, merchant, doc_type,
+                        category_account_map, image_data):
+    """Le travail long de /api/extract (inference Donut + repli vision +
+    construction du bundle) -- execute HORS du thread de la requete HTTP
+    (voir src/jobs.py, GET /api/extract/status/{job_id}). Renvoie le bundle
+    complet, sous la meme forme qu'avant le decouplage (le front n'a presque
+    rien a changer cote consommation du resultat, seulement cote polling)."""
     engine = "donut"
     fallback_note = None
 
@@ -741,16 +767,8 @@ def api_extract(request: Request, file: UploadFile = File(...), country: str = F
             " ".join(str(it.get("name") or "") for it in receipt.items))
         receipt.items = filter_invoice_headers(receipt.items)
 
-    # Miniature (~800px) de l'image d'origine, pour l'AFFICHER plus tard dans le
-    # détail. Encodée en base64 ; le front la renvoie à la validation pour la
-    # stocker avec le reçu. Jamais la pleine résolution (poids maîtrisé).
-    try:
-        image_data = image_to_thumbnail_datauri(image)
-    except Exception:
-        image_data = None
-
     bundle = build_receipt_bundle(receipt, country, payment_mode, _nan(merchant),
-                                  category_account_map=_category_account_map(request))
+                                  category_account_map=category_account_map)
     bundle.update({
         "engine": engine,
         "fallback_note": fallback_note,
@@ -762,7 +780,31 @@ def api_extract(request: Request, file: UploadFile = File(...), country: str = F
         "invoice_number": invoice_number,
         "image_data": image_data,
     })
-    return ok(bundle)
+    return bundle
+
+
+@app.get("/api/extract/status/{job_id}")
+@safe
+def api_extract_status(job_id: str):
+    """Etat d'une extraction soumise via POST /api/extract. Le front
+    interroge cet endpoint jusqu'a status="done" (ou une erreur structuree)."""
+    job = jobs.get_status(job_id)
+    if job is None:
+        return fail("Extraction introuvable.",
+                    detail="Cette extraction n'existe pas ou son résultat a expiré.",
+                    status=404, engine="jobs",
+                    suggestions=["Réessayer l'upload"])
+    if job["status"] in ("pending", "running"):
+        return ok({"status": job["status"]})
+    if job["status"] == "error":
+        logger.error("Job d'extraction en erreur : %s", job["error"])
+        return fail("Une erreur inattendue est survenue pendant l'extraction.",
+                    detail="L'incident a été enregistré côté serveur. Réessayez.",
+                    status=400, engine="server",
+                    suggestions=["Réessayer", "Saisir les données manuellement"])
+    result = dict(job["result"])
+    result["status"] = "done"
+    return ok(result)
 
 
 # ---------------------------------------------------------------------------
