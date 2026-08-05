@@ -261,10 +261,33 @@ def reference_dataset():
     return _reference
 
 
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 Mo : large marge sur une vraie photo/un vrai tableur
+
+
+def _read_upload_bounded(upload_file, max_bytes=MAX_UPLOAD_BYTES):
+    """Lit un UploadFile en memoire, BORNE a max_bytes -- lit par blocs et
+    s'arrete des que la limite est depassee, plutot que .read() sans
+    argument qui chargerait un fichier arbitrairement gros en RAM avant
+    tout controle (DoS par epuisement memoire). Leve ValueError si depasse."""
+    chunks, total = [], 0
+    while True:
+        chunk = upload_file.file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValueError(f"fichier trop volumineux (> {max_bytes // (1024 * 1024)} Mo)")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def to_jsonable(obj):
-    """Rend un objet serialisable en JSON STRICT : NaN/NaT -> null, types numpy
-    -> types Python. Sans ca, le JSON contiendrait des tokens `NaN` invalides
-    que le navigateur refuse de parser."""
+    """Rend un objet serialisable en JSON STRICT : NaN/Infinity/NaT -> null,
+    types numpy -> types Python. Sans ca, JSONResponse (allow_nan=False cote
+    Starlette) leve une ValueError non geree des qu'un Infinity/NaN traine
+    dans les donnees -- ex. un client qui poste `"total": Infinity` (JSON
+    standard n'autorise pas ce token, mais json.loads l'accepte par defaut,
+    donc ca arrive vraiment cote serveur)."""
     if isinstance(obj, dict):
         return {k: to_jsonable(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
@@ -276,7 +299,7 @@ def to_jsonable(obj):
     if isinstance(obj, (np.floating,)):
         obj = float(obj)
     if isinstance(obj, float):
-        return None if math.isnan(obj) else obj
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
     if obj is pd.NaT or (obj is not None and obj is pd.NA):
         return None
     return obj
@@ -594,7 +617,11 @@ def api_extract(request: Request, file: UploadFile = File(...), country: str = F
                 payment_mode: str = Form("cash"), merchant: str = Form(None),
                 doc_type: str = Form("ticket")):
     try:
-        raw = file.file.read()
+        raw = _read_upload_bounded(file)
+    except ValueError:
+        return fail("Fichier trop volumineux.",
+                    detail=f"Taille maximale acceptée : {MAX_UPLOAD_BYTES // (1024 * 1024)} Mo.",
+                    status=422)
     except Exception:
         return fail("Fichier illisible.", detail="Le fichier n'a pas pu être lu.", status=422)
     if not raw:
@@ -941,7 +968,11 @@ def api_bilan_import(request: Request, file: UploadFile = File(...)):
     if error:
         return error
     try:
-        raw = file.file.read()
+        raw = _read_upload_bounded(file)
+    except ValueError:
+        return fail("Fichier trop volumineux.",
+                    detail=f"Taille maximale acceptée : {MAX_UPLOAD_BYTES // (1024 * 1024)} Mo.",
+                    status=422, engine="import")
     except Exception:
         return fail("Fichier illisible.", status=422, engine="import")
     if not raw:
