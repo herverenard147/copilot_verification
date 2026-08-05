@@ -31,6 +31,13 @@ MAX_ATTEMPTS = 5
 LOCKOUT_WINDOW = 15 * 60  # secondes
 _FAILED_LOGINS = {}  # email normalise -> [timestamps des echecs recents]
 
+# Bornes larges mais reelles : empechent un candidat enorme de forcer un
+# hachage/verification argon2 couteux (DoS) ou un email demesure de finir
+# tel quel en base (SQLite n'applique PAS la limite String(255) du modele,
+# contrairement a un vrai serveur SQL -- voir src/models.py).
+MAX_PASSWORD_LENGTH = 1024
+MAX_EMAIL_LENGTH = 255
+
 
 def _too_many_attempts(email):
     now = time.time()
@@ -67,6 +74,8 @@ def verify_user_password(user_id, password):
     """Reverifie le mot de passe d'un compte deja identifie (ex. confirmation
     avant suppression de compte) -- pas une connexion, pas d'anti brute-force
     ici (l'utilisateur est deja authentifie par son cookie de session)."""
+    if not password or len(password) > MAX_PASSWORD_LENGTH:
+        return False
     with get_db() as s:
         user = s.get(User, user_id)
         if user is None or not user.is_active:
@@ -79,10 +88,10 @@ def register_user(email, password):
     passe trop court) plutot qu'une exception SQL brute -- message utilisable
     tel quel par l'API."""
     email = (email or "").strip().lower()
-    if not email or "@" not in email:
+    if not email or "@" not in email or len(email) > MAX_EMAIL_LENGTH:
         raise ValueError("Email invalide.")
-    if not password or len(password) < 8:
-        raise ValueError("Mot de passe trop court (8 caractères minimum).")
+    if not password or len(password) < 8 or len(password) > MAX_PASSWORD_LENGTH:
+        raise ValueError(f"Mot de passe invalide (8 à {MAX_PASSWORD_LENGTH} caractères).")
     with get_db() as s:
         if s.query(User).filter_by(email=email).first():
             raise ValueError("Un compte existe déjà avec cet email.")
@@ -97,6 +106,8 @@ def authenticate(email, password):
     Meme reponse (None) que l'email soit inconnu, le mot de passe faux, ou le
     compte verrouille : ne revele jamais quels emails sont enregistres."""
     email = (email or "").strip().lower()
+    if not password or len(password) > MAX_PASSWORD_LENGTH or len(email) > MAX_EMAIL_LENGTH:
+        return None   # jamais hacher/verifier un candidat demesure (cout argon2)
     if _too_many_attempts(email):
         return None
     with get_db() as s:
