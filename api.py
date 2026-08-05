@@ -182,7 +182,14 @@ _reference = None        # (receipts_ref, items_ref) — corpus CORD pour le mod
 
 
 def get_donut():
-    """Charge Donut (~800 Mo) une seule fois, au premier /api/extract."""
+    """Charge Donut (~800 Mo) une seule fois, au premier /api/extract.
+
+    model.eval() est OBLIGATOIRE, pas cosmetique : from_pretrained() ne le
+    fait PAS tout seul (un nn.Module PyTorch nait en mode .training=True).
+    Sans ca, le dropout du decodeur reste actif pendant la generation :
+    calcul gaspille ET extraction non deterministe (le meme reçu peut donner
+    un resultat different d'un appel a l'autre -- pas juste plus lent, moins
+    fiable)."""
     global _donut
     if _donut is None:
         import torch
@@ -190,9 +197,38 @@ def get_donut():
         name = "naver-clova-ix/donut-base-finetuned-cord-v2"
         processor = DonutProcessor.from_pretrained(name)
         model = VisionEncoderDecoderModel.from_pretrained(name)
+        model.eval()
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        _donut = (processor, model.to(device), device)
+        model = model.to(device)
+        if os.environ.get("DONUT_QUANTIZE", "false").lower() == "true" and device == "cpu":
+            model = _quantize_donut(model)
+        _donut = (processor, model, device)
     return _donut
+
+
+def _quantize_donut(model):
+    """Quantization dynamique int8 (CPU uniquement) : accelere l'inference en
+    reduisant la precision des couches Linear (majorite du calcul dans un
+    transformer). Gain typique x1.5-3 sur CPU, au prix d'une precision
+    numerique moindre -- pour un modele GENERATIF token-par-token comme
+    Donut, un ecart de precision peut faire diverger la sequence produite
+    (contrairement a un classifieur, une petite difference de logits peut
+    changer le token choisi, qui influence tous les suivants). Desactive par
+    defaut (DONUT_QUANTIZE=true pour activer) : a valider sur de vrais reçus
+    avant d'activer en production, jamais suppose sans verification.
+    N'echoue JAMAIS l'extraction : repli sur le modele non quantifie si la
+    quantization elle-meme leve une exception (ce qui couvre aussi le jour
+    ou torch.quantization, deja marquee deprecated au profit de torchao,
+    sera retiree -- le repli reste valable sans rien changer ici)."""
+    try:
+        import torch
+        quantized = torch.quantization.quantize_dynamic(
+            model, {torch.nn.Linear}, dtype=torch.qint8)
+        logger.info("Donut quantifie (int8 dynamique, CPU).")
+        return quantized
+    except Exception:
+        logger.exception("Quantization Donut échouée, repli sur le modèle non quantifié.")
+        return model
 
 
 def get_search():
