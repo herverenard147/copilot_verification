@@ -43,6 +43,7 @@ from src.llm import (
 from src import session_store
 from src import auth as auth_mod
 from src import corrections as corrections_mod
+from src import account_preferences as account_prefs_mod
 from src import db as db_mod
 from src.models import Consent, Correction, User
 
@@ -159,6 +160,15 @@ def _current_user(request):
     present, sinon None. Distinct du cookie de session anonyme `sid`."""
     token = request.cookies.get(auth_mod.AUTH_COOKIE)
     return auth_mod.verify_token(token)
+
+
+def _category_account_map(request):
+    """Preferences de compte par categorie de l'utilisateur connecte
+    (vide si anonyme) -- voir src/account_preferences.py."""
+    user_id = _current_user(request)
+    if user_id is None:
+        return {}
+    return account_prefs_mod.get_account_overrides_map(user_id)
 
 
 # ---------------------------------------------------------------------------
@@ -508,14 +518,39 @@ def _capture_correction(request, payload, receipt_id):
         logger.exception("Capture de correction échouée (non bloquant)")
 
 
+def _capture_account_preference(request, bundle):
+    """Best-effort : quand l'utilisateur connecte surcharge manuellement le
+    compte d'une ligne de charge, retient categorie -> compte pour la
+    prochaine fois (voir src/account_preferences.py). PAS lie au consentement
+    RGPD (ce n'est pas une donnee d'entrainement, juste une preference d'UI).
+    N'a jamais le droit de faire echouer la requete."""
+    user_id = _current_user(request)
+    if user_id is None:
+        return
+    journal = bundle.get("journal") or []
+    try:
+        for line in journal:
+            if line.get("manual") and line.get("categories"):
+                for cat in line["categories"]:
+                    account_prefs_mod.remember_account(user_id, cat, line["account"])
+    except Exception:
+        logger.exception("Mémorisation de préférence de compte échouée (non bloquant)")
+
+
 def build_receipt_bundle(receipt, country, payment_mode, merchant, category=None,
-                         account_overrides=None):
+                         account_overrides=None, category_account_map=None):
     """audit + ecriture + TVA a partir d'un Receipt. Coeur partage par
-    /api/extract, /api/validate et PUT /api/receipt."""
+    /api/extract, /api/validate et PUT /api/receipt.
+
+    `category_account_map` (optionnel) : preferences apprises de l'utilisateur
+    connecte (voir src/account_preferences.py) -- prend le pas sur le mapping
+    par defaut pour proposer directement le bon compte, sans que l'utilisateur
+    ait a recorriger la meme categorie a chaque reçu."""
     flags = audit(receipt, country=country)
     try:
         entry = journal_entry(receipt, category=category, payment_mode=payment_mode,
-                              country=country, merchant=merchant)
+                              country=country, merchant=merchant,
+                              category_account_map=category_account_map)
         # surcharge manuelle des comptes de charge (Tache 4) : compte seul,
         # montant inchange -> equilibre preserve.
         apply_account_overrides(entry, account_overrides)
@@ -547,7 +582,7 @@ def build_receipt_bundle(receipt, country, payment_mode, merchant, category=None
 # ---------------------------------------------------------------------------
 @app.post("/api/extract")
 @safe
-def api_extract(file: UploadFile = File(...), country: str = Form("ID"),
+def api_extract(request: Request, file: UploadFile = File(...), country: str = Form("ID"),
                 payment_mode: str = Form("cash"), merchant: str = Form(None),
                 doc_type: str = Form("ticket")):
     try:
@@ -643,7 +678,8 @@ def api_extract(file: UploadFile = File(...), country: str = Form("ID"),
     except Exception:
         image_data = None
 
-    bundle = build_receipt_bundle(receipt, country, payment_mode, _nan(merchant))
+    bundle = build_receipt_bundle(receipt, country, payment_mode, _nan(merchant),
+                                  category_account_map=_category_account_map(request))
     bundle.update({
         "engine": engine,
         "fallback_note": fallback_note,
@@ -700,7 +736,8 @@ def api_validate(payload: ValidatePayload, request: Request):
     overrides = _merge_overrides(payload)
     bundle = build_receipt_bundle(receipt, payload.country, payload.payment_mode,
                                   _nan(payload.merchant), category=payload.category,
-                                  account_overrides=overrides)
+                                  account_overrides=overrides,
+                                  category_account_map=_category_account_map(request))
     bundle["account_overrides"] = overrides
     bundle["persisted"] = False
 
@@ -710,6 +747,7 @@ def api_validate(payload: ValidatePayload, request: Request):
         session, error = _require_session(request)
         if error:
             return error
+        _capture_account_preference(request, bundle)
         new_id = session.add_receipt(receipt, payload.category, bundle["audit"],
                                      merchant=_nan(payload.merchant), doc_type=payload.doc_type,
                                      invoice_number=_nan(payload.invoice_number),
@@ -764,7 +802,8 @@ def api_receipt(receipt_id: int, request: Request, country: str = "ID",
     overrides = _nan(row.get("account_overrides"))
     bundle = build_receipt_bundle(receipt, country, payment_mode,
                                   _nan(row.get("merchant")), category=_nan(row.get("category")),
-                                  account_overrides=overrides)
+                                  account_overrides=overrides,
+                                  category_account_map=_category_account_map(request))
     bundle["receipt_id"] = receipt_id
     bundle["category"] = _nan(row.get("category"))
     bundle["doc_type"] = _nan(row.get("doc_type")) or "ticket"
@@ -794,7 +833,9 @@ def api_receipt_update(receipt_id: int, payload: ValidatePayload, request: Reque
     overrides = _merge_overrides(payload)
     bundle = build_receipt_bundle(receipt, payload.country, payload.payment_mode,
                                   _nan(payload.merchant), category=payload.category,
-                                  account_overrides=overrides)
+                                  account_overrides=overrides,
+                                  category_account_map=_category_account_map(request))
+    _capture_account_preference(request, bundle)
     session.update_receipt(receipt_id, receipt, payload.category, bundle["audit"],
                            merchant=_nan(payload.merchant), doc_type=payload.doc_type,
                            invoice_number=_nan(payload.invoice_number), account_overrides=overrides,

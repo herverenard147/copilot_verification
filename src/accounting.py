@@ -117,29 +117,48 @@ def _charge_line(account, merchant_label, amount):
     }
 
 
-def _charge_lines(receipt, receipt_category, charge_amount, merchant_label):
+def _charge_lines(receipt, receipt_category, charge_amount, merchant_label, category_account_map=None):
     """Repartit le montant de charge en UNE ligne PAR COMPTE distinct.
 
     Chaque article est mappe vers un compte via SA categorie individuelle
     (`item["category"]`), avec repli sur la categorie globale du recu si
-    l'article n'en a pas. Le montant de charge est ventile entre les comptes au
-    PRORATA des prix de ligne, la derniere ligne absorbant l'arrondi pour que la
-    somme des debits egale exactement `charge_amount` (is_balanced preserve).
+    l'article n'en a pas. `category_account_map` (optionnel) surcharge
+    DEFAULT_CATEGORY_ACCOUNTS -- typiquement les preferences apprises d'un
+    utilisateur (voir src/account_preferences.py). Le montant de charge est
+    ventile entre les comptes au PRORATA des prix de ligne, la derniere ligne
+    absorbant l'arrondi pour que la somme des debits egale exactement
+    `charge_amount` (is_balanced preserve).
+
+    Chaque ligne porte aussi "categories" (les categories qui y contribuent) :
+    permet a l'appelant, si l'utilisateur surcharge manuellement le compte
+    d'une ligne, de retenir "categorie -> compte" pour la prochaine fois
+    (voir api.py, _capture_account_preference).
 
     Repli historique : si aucun article chiffre (pas de line_price), une seule
     ligne sur la categorie globale du recu -- ancien comportement, ne plante pas.
     """
+    # FUSION, pas remplacement : category_account_map({} pour un anonyme)
+    # ne doit JAMAIS eclipser DEFAULT_CATEGORY_ACCOUNTS -- map_category_to_account
+    # utilise `mapping` tel quel des qu'il n'est pas None, donc un dict vide
+    # desactiverait silencieusement tout le mapping par defaut.
+    mapping = {**DEFAULT_CATEGORY_ACCOUNTS, **(category_account_map or {})}
+
     priced = [(it.get("category") or receipt_category, it["line_price"])
               for it in receipt.items if it.get("line_price") is not None]
     items_sum = sum(lp for _, lp in priced)
 
     if not priced or items_sum <= 0:
-        return [_charge_line(map_category_to_account(receipt_category), merchant_label, charge_amount)]
+        line = _charge_line(map_category_to_account(receipt_category, mapping=mapping),
+                            merchant_label, charge_amount)
+        line["categories"] = [receipt_category] if receipt_category else []
+        return [line]
 
     by_account = {}
+    by_account_categories = {}
     for category, line_price in priced:
-        account = map_category_to_account(category)
+        account = map_category_to_account(category, mapping=mapping)
         by_account[account] = by_account.get(account, 0.0) + line_price
+        by_account_categories.setdefault(account, set()).add(category)
 
     lines, allocated = [], 0.0
     accounts = sorted(by_account)                      # ordre stable et deterministe
@@ -149,18 +168,25 @@ def _charge_lines(receipt, receipt_category, charge_amount, merchant_label):
             allocated += amount
         else:
             amount = round(charge_amount - allocated, 2)   # derniere ligne : absorbe l'arrondi
-        lines.append(_charge_line(account, merchant_label, amount))
+        line = _charge_line(account, merchant_label, amount)
+        line["categories"] = sorted(by_account_categories[account])
+        lines.append(line)
     return lines
 
 
-def journal_entry(receipt, category, payment_mode="cash", country="CI", merchant=None):
+def journal_entry(receipt, category, payment_mode="cash", country="CI", merchant=None,
+                  category_account_map=None):
     """Construit l'ecriture comptable d'un recu -> liste de lignes
-    {account, label, debit, credit}.
+    {account, label, debit, credit, categories}.
 
     Debit charge 6xx (HT si TVA recuperable, TTC sinon car la TVA non
     recuperable est REINTEGREE dans la charge), debit 4452 si TVA
     recuperable, credit 571/521/401 selon le mode de paiement, pour le TTC.
     L'ecriture reste equilibree par construction (voir is_balanced).
+
+    `category_account_map` (optionnel) : {categorie: compte} qui prend le pas
+    sur DEFAULT_CATEGORY_ACCOUNTS pour les lignes de charge -- typiquement les
+    preferences apprises d'un utilisateur a partir de ses surcharges passees.
     """
     if payment_mode not in PAYMENT_ACCOUNTS:
         raise ValueError(
@@ -182,7 +208,7 @@ def journal_entry(receipt, category, payment_mode="cash", country="CI", merchant
 
     # Une ligne de charge PAR COMPTE distinct : chaque article part sur le compte
     # de SA categorie (un reçu peut melanger marchandises et transport).
-    lines = _charge_lines(receipt, category, charge_amount, merchant_label)
+    lines = _charge_lines(receipt, category, charge_amount, merchant_label, category_account_map)
 
     if recoverable > 0:
         lines.append({

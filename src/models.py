@@ -18,7 +18,7 @@ purges separement (session_store.drop_session), voir api.py.
 """
 from datetime import datetime, timezone
 
-from sqlalchemy import ForeignKey, Integer, JSON, String
+from sqlalchemy import Float, ForeignKey, Integer, JSON, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -42,6 +42,10 @@ class User(Base):
     corrections: Mapped[list["Correction"]] = relationship(
         back_populates="user", cascade="all, delete-orphan")
     consents: Mapped[list["Consent"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan")
+    account_preferences: Mapped[list["AccountPreference"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan")
+    ledger_entries: Mapped[list["LedgerEntry"]] = relationship(
         back_populates="user", cascade="all, delete-orphan")
 
 
@@ -86,3 +90,44 @@ class Consent(Base):
     created_at: Mapped[datetime] = mapped_column(default=_utcnow, nullable=False)
 
     user: Mapped["User"] = relationship(back_populates="consents")
+
+
+class AccountPreference(Base):
+    """Compte de charge prefere par un utilisateur pour une categorie donnee,
+    appris de ses surcharges manuelles (voir src/account_preferences.py,
+    api.py:_capture_account_preference). Une ligne par (user_id, categorie) :
+    upsert, pas d'historique -- seule la derniere preference compte."""
+    __tablename__ = "account_preferences"
+    __table_args__ = (UniqueConstraint("user_id", "category", name="uq_account_pref_user_category"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    category: Mapped[str] = mapped_column(String(100), nullable=False)  # normalisee (voir _normalize)
+    account: Mapped[str] = mapped_column(String(10), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow, nullable=False)
+
+    user: Mapped["User"] = relationship(back_populates="account_preferences")
+
+
+class LedgerEntry(Base):
+    """Ligne d'ecriture qui n'est PAS derivee d'un recu : import externe
+    (Excel/CSV/Word, voir src/import_ledger.py) ou saisie manuelle -- capital,
+    immobilisations, solde d'ouverture... Combinee avec les ecritures issues
+    des recus pour calculer le bilan (voir src/bilan.py). Le plan de comptes
+    n'est PAS restreint aux comptes de charge : un bilan couvre toutes les
+    classes (voir src/accounting.py: ACCOUNT_METADATA)."""
+    __tablename__ = "ledger_entries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    account: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    label: Mapped[str | None] = mapped_column(String(255))
+    debit: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    credit: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    source: Mapped[str] = mapped_column(String(20), nullable=False)  # "import" | "manual"
+    imported_from: Mapped[str | None] = mapped_column(String(255))  # nom du fichier, si source="import"
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow, nullable=False)
+
+    user: Mapped["User"] = relationship(back_populates="ledger_entries")
