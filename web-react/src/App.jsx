@@ -6,8 +6,8 @@ import AnalyzeTab from "./components/AnalyzeTab.jsx";
 import DashboardTab from "./components/DashboardTab.jsx";
 import AccountingTab from "./components/AccountingTab.jsx";
 import AskTab from "./components/AskTab.jsx";
-import TechnicalTab from "./components/TechnicalTab.jsx";
 import SettingsPanel from "./components/SettingsPanel.jsx";
+import AuthGate from "./components/AuthGate.jsx";
 
 const FALLBACK_CONFIG = {
   countries: { CI: 0.18, ID: 0.11 }, payment_modes: ["cash", "bank", "credit"],
@@ -15,12 +15,15 @@ const FALLBACK_CONFIG = {
 };
 const COUNTRY_LABELS = { CI: "Côte d'Ivoire — TVA 18%", ID: "Indonésie — TVA 11%" };
 const PAYMENT_LABELS = { cash: "Espèces (caisse)", bank: "Virement bancaire", credit: "À crédit (fournisseur)" };
+// Onglet Technique volontairement absent de l'app "produit" (comparatif
+// Donut/baseline, courbe de perte — pertinent pour une soutenance, pas pour
+// un utilisateur final). Le composant existe toujours (TechnicalTab.jsx),
+// juste plus référencé ici.
 const TABS = [
   { id: "analyze", label: "Analyser" },
   { id: "dashboard", label: "Tableau de bord" },
   { id: "accounting", label: "Comptabilité" },
   { id: "ask", label: "Questions" },
-  { id: "technical", label: "Technique" },
 ];
 
 export default function App() {
@@ -79,6 +82,16 @@ export default function App() {
   }
 
   const cfg = config || FALLBACK_CONFIG;
+
+  // Connexion obligatoire : rien de l'app n'est accessible avant. Pendant la
+  // toute première vérification (auth.loading), on évite un flash de
+  // l'écran de connexion si l'utilisateur est en fait déjà authentifié.
+  if (auth.loading) {
+    return <div style={{ minHeight: "100vh" }} />;
+  }
+  if (!auth.isAuthenticated) {
+    return <AuthGate auth={auth} />;
+  }
 
   return (
     <>
@@ -147,10 +160,6 @@ export default function App() {
         <section className={activeTab === "ask" ? "" : "hidden"}>
           <AskTab country={country} demoMode={sessionInfo.demoMode} sessionEmpty={sessionInfo.sessionEmpty}
             groqConfigured={!!cfg.groq_configured} onEditReceipt={handleEditReceipt} />
-        </section>
-
-        <section className={activeTab === "technical" ? "" : "hidden"}>
-          <TechnicalTab />
         </section>
       </main>
 
