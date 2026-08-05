@@ -1,23 +1,33 @@
-"""Cloisonnement des donnees par session utilisateur (EN MEMOIRE uniquement).
+"""Cloisonnement des donnees par session utilisateur.
 
 Les CSV de data/ sont un CORPUS DE REFERENCE (CORD) : entrainement, evaluation,
 clustering KMeans, index FAISS de reference. Ce ne sont PAS les depenses de
 l'utilisateur. Ce module tient les recus que l'utilisateur depose et valide
 pendant SA session ; le tableau de bord, la comptabilite et les questions
-lisent ces donnees-la. Aucune ecriture disque : un correcteur qui clone
-n'herite jamais des recus d'un autre.
+lisent ces donnees-la. Aucune ecriture disque HORS PERSISTANCE EXPLICITE : un
+correcteur qui clone n'herite jamais des recus d'un autre.
 
-Prevu pour l'authentification future : chaque UserSession porte un `user_id`
-(None pour l'instant). Le jour ou l'auth arrive, il suffira de keyer le
-registre sur `user_id` au lieu du `session_id` -- voir get_session() -- sans
-toucher au reste du code.
+AUTH : chaque UserSession porte un `user_id` (None si anonyme). En mode prod
+(api.py), le registre est keye sur `user:{user_id}` au lieu du cookie anonyme.
 
-PERSISTANCE LEGERE (optionnelle) : si init_persistence(path) est appele (par
-api.py au demarrage d'un vrai serveur), les reçus valides sont sauvegardes dans
-un fichier JSON HORS DEPOT (.local_state/), et recharges au demarrage suivant.
-JAMAIS dans data/*.csv (corpus CORD intouchable). Le mode demo n'est pas
-persiste. Sans init_persistence (ex. tests via TestClient sans context manager),
-aucune I/O disque -- comportement historique.
+DEUX MECANISMES DE PARTAGE DE L'ETAT, INDEPENDANTS :
+
+1. PERSISTANCE SQLite (optionnelle, init_persistence(path)) : survit a un
+   REDEMARRAGE du process. Fichier HORS DEPOT (.local_state/), jamais
+   data/*.csv. Le mode demo n'est JAMAIS persiste ici (voir _save()).
+
+2. CACHE REDIS PARTAGE (optionnel, init_redis(url)) : necessaire des qu'il y
+   a PLUSIEURS instances derriere un load balancer -- sans lui, une session
+   commencee sur l'instance A est invisible sur l'instance B (chacune a son
+   propre dict _sessions en memoire), et le mode demo casse au premier
+   routage vers une autre instance. Contrairement a la persistance SQLite,
+   le mode demo PARTICIPE au cache Redis (ce n'est pas une question de
+   survivre a un redemarrage, mais de rester coherent ENTRE deux requetes de
+   la MEME session utilisateur qui atterrissent sur deux instances differentes).
+   Si Redis est configure, il devient la SOURCE DE VERITE : get_session() y
+   lit en premier. Sinon, repli integral sur le dict _sessions en memoire
+   (comportement historique inchange -- aucune regression pour un usage
+   mono-instance sans Redis).
 """
 import json
 import math
@@ -92,6 +102,7 @@ class UserSession:
         self.demo_mode = False
         self._next_id = 0
         _save()   # persiste l'etat vidé (retire cette session du fichier)
+        _redis_save(self)   # propage aux autres instances (no-op si Redis desactive)
 
     # -- ecriture (memoire seule) --------------------------------------------
     def _item_rows(self, rid, receipt, category):
@@ -127,6 +138,7 @@ class UserSession:
                                                doc_type, invoice_number, account_overrides,
                                                image_data))
         _save()   # persiste apres chaque reçu validé (si la persistance est active)
+        _redis_save(self)
         return rid
 
     def update_receipt(self, receipt_id, receipt, category, flags, merchant=None,
@@ -148,6 +160,7 @@ class UserSession:
                                     invoice_number, account_overrides, image_data)
         self.receipts = [new_row if int(r["receipt_id"]) == rid else r for r in self.receipts]
         _save()
+        _redis_save(self)
         return True
 
     def delete_receipt(self, receipt_id):
@@ -157,16 +170,20 @@ class UserSession:
         self.receipts = [r for r in self.receipts if int(r["receipt_id"]) != rid]
         self.items = [it for it in self.items if int(it["receipt_id"]) != rid]
         _save()
+        _redis_save(self)
         return len(self.receipts) < n
 
     def load_demo(self, receipts, items):
         """MODE DEMONSTRATION : peuple la session avec un corpus (copie
-        defensive) et active le drapeau demo. Les donnees restent en memoire."""
+        defensive) et active le drapeau demo. Jamais persiste en SQLite (voir
+        _save()), mais PARTAGE via Redis si configure : sinon le mode demo
+        casse des que la requete suivante atterrit sur une autre instance."""
         self.clear()
         self.receipts = [dict(r) for r in receipts]
         self.items = [dict(i) for i in items]
         self.demo_mode = True
         self._next_id = max((int(r["receipt_id"]) for r in self.receipts), default=-1) + 1
+        _redis_save(self)
 
     # -- DataFrames -----------------------------------------------------------
     def receipts_df(self):
@@ -343,9 +360,24 @@ IDLE_TTL_SECONDS = 24 * 60 * 60
 
 
 def get_session(session_id, user_id=None):
-    """Recupere (ou cree) la session. AUTH FUTURE : quand un user_id existera,
-    keyer `_sessions` sur user_id ici -- le reste du code passe deja par cette
-    fonction, donc rien d'autre a changer."""
+    """Recupere (ou cree) la session.
+
+    Si Redis est configure (init_redis) : c'est la SOURCE DE VERITE. On y lit
+    a CHAQUE appel plutot que de faire confiance a un dict local qui peut etre
+    perime (une autre instance a pu modifier cette session entre-temps) --
+    necessaire des qu'il y a plusieurs instances derriere un load balancer,
+    sinon une session commencee sur l'instance A est invisible sur B.
+
+    Sinon : repli integral sur le dict _sessions en memoire du process
+    (comportement historique, inchange -- aucune regression pour un usage
+    mono-instance sans Redis, y compris en test)."""
+    if _redis is not None:
+        session = _redis_load(session_id, user_id=user_id)
+        if session is None:
+            session = UserSession(session_id, user_id=user_id)
+            _redis_save(session)
+        session.last_accessed = time.time()
+        return session
     session = _sessions.get(session_id)
     if session is None:
         session = UserSession(session_id, user_id=user_id)
@@ -362,7 +394,12 @@ def evict_idle_sessions(ttl_seconds=IDLE_TTL_SECONDS):
     ici : il n'existe pas (encore) de mecanisme pour la recharger a la demande
     depuis la base si elle redevient active -- l'evincer perdrait des
     donnees visibles par l'utilisateur tant que ce mecanisme n'existe pas.
-    Renvoie le nombre de sessions evincees."""
+    Renvoie le nombre de sessions evincees.
+
+    Si Redis est configure, cette fonction est un NO-OP utile (le dict local
+    _sessions n'est plus la source de verite, get_session() ne le peuple
+    plus) : Redis applique sa propre expiration (TTL sur chaque cle, voir
+    _redis_save), pas besoin de dupliquer cette logique."""
     now = time.time()
     to_evict = [sid for sid, s in _sessions.items()
                if (now - s.last_accessed) > ttl_seconds and (s.demo_mode or s.is_empty())]
@@ -373,12 +410,21 @@ def evict_idle_sessions(ttl_seconds=IDLE_TTL_SECONDS):
 
 def drop_session(session_id):
     _sessions.pop(session_id, None)
+    _redis_drop(session_id)
     _save()
 
 
 def reset_all():
-    """Vide tout le registre (utilise par les tests). Ne touche pas au fichier."""
+    """Vide tout le registre (utilise par les tests). Ne touche pas au fichier.
+    Si Redis est configure, purge aussi les cles copilote:session:* (scan
+    cible, jamais un FLUSHALL -- la meme base Redis peut servir a autre chose)."""
     _sessions.clear()
+    if _redis is not None:
+        try:
+            for key in _redis.scan_iter(match=f"{_REDIS_PREFIX}*"):
+                _redis.delete(key)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -521,3 +567,90 @@ def _save():
             _conn.rollback()
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Cache Redis PARTAGE (optionnel) -- necessaire des qu'il y a plusieurs
+# instances derriere un load balancer. Desactive par defaut : seul
+# init_redis() l'active (api.py au demarrage, si REDIS_URL est definie).
+# JAMAIS bloquant : toute erreur Redis (indisponible, timeout, cle
+# corrompue...) fait retomber silencieusement sur le comportement memoire
+# locale existant -- une panne Redis degrade (perte du partage entre
+# instances) mais ne casse jamais le service.
+# ---------------------------------------------------------------------------
+_redis = None                      # None = cache desactive (repli memoire locale)
+_REDIS_PREFIX = "copilote:session:"
+
+
+def init_redis(url):
+    """Active le cache Redis partage. Ping immediat : si Redis n'est pas
+    joignable, on repart en mode memoire locale plutot que d'echouer chaque
+    requete plus tard."""
+    global _redis
+    try:
+        import redis as redis_lib
+        client = redis_lib.from_url(url, decode_responses=True, socket_connect_timeout=2)
+        client.ping()
+        _redis = client
+    except Exception:
+        _redis = None
+
+
+def close_redis():
+    global _redis
+    if _redis is not None:
+        try:
+            _redis.close()
+        except Exception:
+            pass
+    _redis = None
+
+
+def _redis_key(session_id):
+    return f"{_REDIS_PREFIX}{session_id}"
+
+
+def _redis_save(session):
+    """Ecrit l'etat complet de la session dans Redis (TTL = IDLE_TTL_SECONDS,
+    coherent avec evict_idle_sessions -- Redis fait lui-meme l'eviction des
+    sessions partagees inactives, pas besoin de dupliquer cette logique).
+    Best-effort : ne leve jamais."""
+    if _redis is None:
+        return
+    try:
+        payload = json.dumps({
+            "receipts": session.receipts, "items": session.items,
+            "demo_mode": session.demo_mode, "next_id": session._next_id,
+        }, ensure_ascii=False)
+        _redis.set(_redis_key(session.session_id), payload, ex=IDLE_TTL_SECONDS)
+    except Exception:
+        pass
+
+
+def _redis_load(session_id, user_id=None):
+    """Reconstruit une UserSession depuis Redis, ou None si absente/erreur
+    (l'appelant cree alors une session vide -- jamais de crash)."""
+    if _redis is None:
+        return None
+    try:
+        raw = _redis.get(_redis_key(session_id))
+        if raw is None:
+            return None
+        data = json.loads(raw)
+        session = UserSession(session_id, user_id=user_id)
+        session.receipts = data.get("receipts", [])
+        session.items = data.get("items", [])
+        session.demo_mode = bool(data.get("demo_mode", False))
+        session._next_id = int(data.get("next_id", 0))
+        return session
+    except Exception:
+        return None
+
+
+def _redis_drop(session_id):
+    if _redis is None:
+        return
+    try:
+        _redis.delete(_redis_key(session_id))
+    except Exception:
+        pass

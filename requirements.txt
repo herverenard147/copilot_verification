@@ -41,5 +41,10 @@ opencv-python-headless>=4.9    # CLAHE + detection des bords (src/preprocess.py)
 openpyxl>=3.1                  # lecture .xlsx (pandas.read_excel)
 python-docx>=1.1               # lecture des tableaux dans un .docx
 
+# Scaling horizontal (optionnel) : cache partage sessions/jobs/limites entre
+# plusieurs instances. Sans REDIS_URL configuree, repli total sur la memoire
+# locale du process -- aucune regression pour un usage mono-instance.
+redis>=5.0
+
 # Tests
 pytest>=8.0
