@@ -3,6 +3,10 @@ fastapi>=0.110
 uvicorn[standard]>=0.29
 python-multipart>=0.0.9        # upload d'images (POST /api/extract)
 
+# Comptes utilisateurs, base de donnees, corrections (RGPD)
+SQLAlchemy>=2.0
+argon2-cffi>=23.1              # hash de mot de passe (argon2id)
+
 # Interface technique de secours (Streamlit, non maintenue mais conservee)
 streamlit>=1.32
 
