@@ -41,6 +41,8 @@ from src.llm import (
     classify_models, select_vision_model,
 )
 from src import session_store
+from src import auth as auth_mod
+from src import db as db_mod
 
 DATA = Path("data")
 WEB = Path("web")
@@ -50,14 +52,26 @@ WEB = Path("web")
 # ne declenche pas le lifespan -> aucune I/O disque pendant les tests.
 STATE_FILE = os.environ.get("COPILOTE_STATE_FILE", ".local_state/sessions.db")
 
+# Base comptes/corrections (src/models.py), fichier separe de sessions.db :
+# schema different, cycle de vie different (les comptes ne sont jamais purges
+# au vidage d'une session anonyme).
+AUTH_DB_FILE = os.environ.get("COPILOTE_AUTH_DB_FILE", ".local_state/app.db")
+
+# Cookies "secure" (HTTPS uniquement) : desactive par defaut pour le dev local
+# en http. A positionner a "true" via COOKIE_SECURE des que le service est
+# expose en ligne (HTTPS obligatoire, voir analyse RGPD/securite du projet).
+COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "false").lower() == "true"
+
 
 @contextlib.asynccontextmanager
 async def _lifespan(app):
     session_store.init_persistence(STATE_FILE)   # ouvre SQLite + recharge l'etat
+    db_mod.init_db(AUTH_DB_FILE)                  # comptes / recus lies / corrections
     try:
         yield
     finally:
         session_store.close_persistence()        # ferme proprement la connexion
+        db_mod.close_db()
 
 
 app = FastAPI(title="Copilote de reçus — API", lifespan=_lifespan)
@@ -96,6 +110,13 @@ async def ensure_session(request: Request, call_next):
 def _session(request):
     """La session utilisateur courante (creee a la volee si besoin)."""
     return session_store.get_session(request.state.sid)
+
+
+def _current_user(request):
+    """user_id si un cookie d'auth valide (non expire, non altere) est
+    present, sinon None. Distinct du cookie de session anonyme `sid`."""
+    token = request.cookies.get(auth_mod.AUTH_COOKIE)
+    return auth_mod.verify_token(token)
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +267,69 @@ def safe(fn):
                         status=400, engine="server",
                         suggestions=["Réessayer", "Recharger la page"])
     return wrapper
+
+
+# ---------------------------------------------------------------------------
+# AUTHENTIFICATION (comptes reels, src/auth.py + src/models.py)
+# ---------------------------------------------------------------------------
+class RegisterPayload(BaseModel):
+    email: str
+    password: str
+
+
+class LoginPayload(BaseModel):
+    email: str
+    password: str
+
+
+def _set_auth_cookie(response, user_id):
+    token = auth_mod.issue_token(user_id)
+    response.set_cookie(auth_mod.AUTH_COOKIE, token, httponly=True,
+                        samesite="lax", secure=COOKIE_SECURE,
+                        max_age=auth_mod.SESSION_MAX_AGE)
+
+
+@app.post("/api/auth/register")
+@safe
+def api_auth_register(payload: RegisterPayload):
+    try:
+        user_id = auth_mod.register_user(payload.email, payload.password)
+    except ValueError as exc:
+        return fail(str(exc), status=422, engine="auth")
+    response = ok({"user_id": user_id, "email": payload.email.strip().lower()})
+    _set_auth_cookie(response, user_id)
+    return response
+
+
+@app.post("/api/auth/login")
+@safe
+def api_auth_login(payload: LoginPayload):
+    user_id = auth_mod.authenticate(payload.email, payload.password)
+    if user_id is None:
+        return fail("Email ou mot de passe incorrect.", status=401, engine="auth",
+                    suggestions=["Vérifier l'email et le mot de passe",
+                                 "Réessayer dans quelques minutes en cas d'échecs répétés"])
+    response = ok({"user_id": user_id})
+    _set_auth_cookie(response, user_id)
+    return response
+
+
+@app.post("/api/auth/logout")
+@safe
+def api_auth_logout():
+    response = ok({"logged_out": True})
+    response.delete_cookie(auth_mod.AUTH_COOKIE)
+    return response
+
+
+@app.get("/api/auth/me")
+@safe
+def api_auth_me(request: Request):
+    user_id = _current_user(request)
+    if user_id is None:
+        return fail("Non connecté.", status=401, engine="auth",
+                    suggestions=["Se connecter", "Créer un compte"])
+    return ok({"user_id": user_id})
 
 
 def _nan(value):

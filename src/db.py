@@ -11,6 +11,7 @@ from pathlib import Path
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from src.models import Base
 
@@ -28,9 +29,9 @@ def _enable_foreign_keys(engine):
         cursor.close()
 
 
-def _build(url):
+def _build(url, **engine_kwargs):
     global _engine, _SessionLocal
-    _engine = create_engine(url, connect_args={"check_same_thread": False})
+    _engine = create_engine(url, connect_args={"check_same_thread": False}, **engine_kwargs)
     _enable_foreign_keys(_engine)
     Base.metadata.create_all(_engine)
     _SessionLocal = sessionmaker(bind=_engine, expire_on_commit=False)
@@ -43,8 +44,11 @@ def init_db(path):
 
 
 def init_db_memory():
-    """Base ephemere en memoire : pour les tests, jamais sur disque."""
-    _build("sqlite:///:memory:")
+    """Base ephemere en memoire : pour les tests, jamais sur disque.
+    StaticPool = une seule connexion partagee entre threads : sans ca, chaque
+    thread du threadpool FastAPI verrait sa PROPRE base ':memory:' vide (donc
+    "no such table") des qu'un endpoint API est appele via TestClient."""
+    _build("sqlite:///:memory:", poolclass=StaticPool)
 
 
 def close_db():
