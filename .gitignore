@@ -73,3 +73,9 @@ Thumbs.db
 # Claude Code / agents : outillage local (symlinks vers .venv, jamais versionne)
 .claude/
 .agents/
+
+# --- Front React (web-react/) : dependances et build, jamais versionnes ---
+# (dist/ deja couvert par la regle generique ligne 8 ; node_modules explicite ici)
+node_modules/
+web-react/dist/
+npm-debug.log*

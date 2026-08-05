@@ -48,6 +48,7 @@ from src.models import Consent, Correction, User
 
 DATA = Path("data")
 WEB = Path("web")
+WEB_REACT_DIST = Path("web-react/dist")
 
 # Persistance legere des sessions, HORS DEPOT (jamais data/*.csv). Activee au
 # demarrage d'un vrai serveur uniquement : TestClient (sans context manager)
@@ -1102,6 +1103,12 @@ async def any_error(request, exc):
 
 # ---------------------------------------------------------------------------
 # Front statique (monte en DERNIER pour ne pas masquer /api/*)
+# Le nouveau front React (web-react/, build Vite) prend le pas s'il a été
+# buildé (npm run build -> web-react/dist) ; sinon on retombe sur l'ancien
+# front vanilla (web/), qui reste fonctionnel intact -- migration progressive,
+# jamais d'app cassée si le build React est absent.
 # ---------------------------------------------------------------------------
-if WEB.exists():
+if WEB_REACT_DIST.exists():
+    app.mount("/", StaticFiles(directory=str(WEB_REACT_DIST), html=True), name="web-react")
+elif WEB.exists():
     app.mount("/", StaticFiles(directory=str(WEB), html=True), name="web")
