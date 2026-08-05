@@ -5,6 +5,7 @@ import { toast, Toast } from "./toast.jsx";
 import AnalyzeTab from "./components/AnalyzeTab.jsx";
 import DashboardTab from "./components/DashboardTab.jsx";
 import AccountingTab from "./components/AccountingTab.jsx";
+import BilanTab from "./components/BilanTab.jsx";
 import AskTab from "./components/AskTab.jsx";
 import TechnicalTab from "./components/TechnicalTab.jsx";
 import SettingsPanel from "./components/SettingsPanel.jsx";
@@ -24,6 +25,7 @@ const BASE_TABS = [
   { id: "analyze", label: "Analyser" },
   { id: "dashboard", label: "Tableau de bord" },
   { id: "accounting", label: "Comptabilité" },
+  { id: "bilan", label: "Bilan" },
   { id: "ask", label: "Questions" },
 ];
 // Onglet Technique (comparatif Donut/baseline, courbe de perte) : utile pour
@@ -164,6 +166,11 @@ export default function App() {
             country={country} payment={payment} demoMode={sessionInfo.demoMode}
             onSessionChange={handleSessionChange} onEditReceipt={handleEditReceipt}
             onGoAnalyze={() => setActiveTab("analyze")} />
+        </section>
+
+        <section className={activeTab === "bilan" ? "" : "hidden"}>
+          <BilanTab active={activeTab === "bilan"} refreshToken={refreshToken}
+            country={country} payment={payment} isAuthenticated={auth.isAuthenticated} />
         </section>
 
         <section className={activeTab === "ask" ? "" : "hidden"}>

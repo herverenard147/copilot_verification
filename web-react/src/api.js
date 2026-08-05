@@ -91,6 +91,17 @@ const API = {
     postJSON('/api/auth/consent', { consent_type: consentType, granted }),
   exportData: () => getJSON('/api/auth/export'),
   deleteAccount: (password) => del('/api/auth/account', { password }),
+
+  // --- Bilan comptable ---
+  bilan: (paymentMode = 'cash', country = 'ID') =>
+    getJSON('/api/bilan?' + new URLSearchParams({ payment_mode: paymentMode, country })),
+  importBilan(file) {
+    const form = new FormData();
+    form.append('file', file);
+    return _json(fetch('/api/bilan/import', { method: 'POST', credentials: 'include', body: form }));
+  },
+  addBilanEntry: (payload) => postJSON('/api/bilan/entry', payload),
+  clearBilanEntries: () => del('/api/bilan/entries'),
 };
 
 export default API;
