@@ -83,16 +83,32 @@ AUTH_DB_FILE = os.environ.get("COPILOTE_AUTH_DB_FILE", f".local_state/app_{APP_M
 # expose en ligne (HTTPS obligatoire, voir analyse RGPD/securite du projet).
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "false").lower() == "true"
 
+# Scaling horizontal (optionnel) : sessions, statut des jobs, limites de debit
+# et verrou anti brute-force partages entre plusieurs instances via Redis.
+# Non definie -> chaque module reste sur son repli memoire locale (comportement
+# historique, aucune regression en mono-instance).
+REDIS_URL = os.environ.get("REDIS_URL", "").strip()
+
 
 @contextlib.asynccontextmanager
 async def _lifespan(app):
     session_store.init_persistence(STATE_FILE)   # ouvre SQLite + recharge l'etat
     db_mod.init_db(AUTH_DB_FILE)                  # comptes / recus lies / corrections
+    if REDIS_URL:
+        session_store.init_redis(REDIS_URL)
+        jobs.init_redis(REDIS_URL)
+        rate_limit.init_redis(REDIS_URL)
+        auth_mod.init_redis(REDIS_URL)
     try:
         yield
     finally:
         session_store.close_persistence()        # ferme proprement la connexion
         db_mod.close_db()
+        if REDIS_URL:
+            session_store.close_redis()
+            jobs.close_redis()
+            rate_limit.close_redis()
+            auth_mod.close_redis()
 
 
 app = FastAPI(title="Copilote de reçus — API", lifespan=_lifespan)

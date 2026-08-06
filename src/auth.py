@@ -10,8 +10,12 @@ alors pas a un redemarrage, ce qui est le comportement de secours le moins
 risque (jamais une cle fixe partagee/predictible).
 
 Anti brute-force : MAX_ATTEMPTS echecs par email sur LOCKOUT_WINDOW verrouille
-temporairement les tentatives suivantes (memoire process, non persiste --
-suffisant comme frein, pas concu pour resister a un redemarrage cible)."""
+temporairement les tentatives suivantes. En mono-instance : memoire process
+(non persiste -- suffisant comme frein, pas concu pour resister a un
+redemarrage cible). En multi-instance (init_redis(url)) : le compteur
+d'echecs DOIT etre partage, sinon un attaquant contourne le verrou en
+repartissant ses tentatives entre plusieurs instances derriere le load
+balancer -- chacune ne verrait qu'une fraction des echecs reels."""
 import os
 import time
 
@@ -29,7 +33,37 @@ SESSION_MAX_AGE = 60 * 60 * 24 * 14  # 14 jours
 
 MAX_ATTEMPTS = 5
 LOCKOUT_WINDOW = 15 * 60  # secondes
-_FAILED_LOGINS = {}  # email normalise -> [timestamps des echecs recents]
+_FAILED_LOGINS = {}  # email normalise -> [timestamps des echecs recents] (repli local)
+
+_redis = None
+_REDIS_PREFIX = "copilote:loginfail:"
+
+
+def init_redis(url):
+    """Active le partage Redis du compteur d'echecs. Ping immediat : si
+    Redis n'est pas joignable, repli silencieux sur la memoire locale."""
+    global _redis
+    try:
+        import redis as redis_lib
+        client = redis_lib.from_url(url, decode_responses=True, socket_connect_timeout=2)
+        client.ping()
+        _redis = client
+    except Exception:
+        _redis = None
+
+
+def close_redis():
+    global _redis
+    if _redis is not None:
+        try:
+            _redis.close()
+        except Exception:
+            pass
+    _redis = None
+
+
+def _redis_key(email):
+    return f"{_REDIS_PREFIX}{email}"
 
 # Bornes larges mais reelles : empechent un candidat enorme de forcer un
 # hachage/verification argon2 couteux (DoS) ou un email demesure de finir
@@ -40,6 +74,14 @@ MAX_EMAIL_LENGTH = 255
 
 
 def _too_many_attempts(email):
+    if _redis is not None:
+        try:
+            key = _redis_key(email)
+            now = time.time()
+            _redis.zremrangebyscore(key, 0, now - LOCKOUT_WINDOW)
+            return _redis.zcard(key) >= MAX_ATTEMPTS
+        except Exception:
+            pass   # Redis en panne en cours de route -> repli local, jamais un crash
     now = time.time()
     recent = [t for t in _FAILED_LOGINS.get(email, []) if now - t < LOCKOUT_WINDOW]
     _FAILED_LOGINS[email] = recent
@@ -47,10 +89,25 @@ def _too_many_attempts(email):
 
 
 def _record_failure(email):
+    if _redis is not None:
+        try:
+            now = time.time()
+            key = _redis_key(email)
+            _redis.zadd(key, {f"{now}:{os.urandom(4).hex()}": now})
+            _redis.expire(key, LOCKOUT_WINDOW)
+            return
+        except Exception:
+            pass
     _FAILED_LOGINS.setdefault(email, []).append(time.time())
 
 
 def _clear_failures(email):
+    if _redis is not None:
+        try:
+            _redis.delete(_redis_key(email))
+            return
+        except Exception:
+            pass
     _FAILED_LOGINS.pop(email, None)
 
 
