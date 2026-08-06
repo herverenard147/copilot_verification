@@ -46,5 +46,10 @@ python-docx>=1.1               # lecture des tableaux dans un .docx
 # locale du process -- aucune regression pour un usage mono-instance.
 redis>=5.0
 
+# Scaling horizontal (optionnel) : base comptes/corrections/bilan partagee
+# entre plusieurs instances. Sans DATABASE_URL configuree, repli sur SQLite
+# local (comportement historique, aucune regression en mono-instance).
+psycopg[binary]>=3.1
+
 # Tests
 pytest>=8.0

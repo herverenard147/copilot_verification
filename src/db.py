@@ -5,7 +5,14 @@ Meme discipline que src/session_store.py : AUCUNE I/O disque tant que
 init_db() n'est pas appele explicitement (api.py au demarrage d'un vrai
 serveur). Les tests utilisent init_db_memory() (SQLite en memoire, jamais
 sur disque, jamais partage entre tests).
-"""
+
+SCALING HORIZONTAL : SQLite est un fichier sur le disque LOCAL d'une seule
+instance -- invisible aux autres. Des que DATABASE_URL est definie (ex.
+"postgresql+psycopg://user:pass@host/db"), init_db() l'utilise a la place
+de son chemin SQLite par defaut : toutes les instances partagent alors la
+meme base Postgres. Sans DATABASE_URL, comportement historique inchange
+(SQLite local, aucune regression pour un usage mono-instance)."""
+import os
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -19,9 +26,14 @@ _engine = None
 _SessionLocal = None
 
 
+def _is_sqlite(url):
+    return url.startswith("sqlite")
+
+
 def _enable_foreign_keys(engine):
     """SQLite n'applique les ondelete=CASCADE/SET NULL que si les foreign
-    keys sont explicitement activees, par connexion."""
+    keys sont explicitement activees, par connexion. Postgres les applique
+    nativement -- rien a faire de ce cote la."""
     @event.listens_for(engine, "connect")
     def _pragma(dbapi_connection, _record):
         cursor = dbapi_connection.cursor()
@@ -31,14 +43,25 @@ def _enable_foreign_keys(engine):
 
 def _build(url, **engine_kwargs):
     global _engine, _SessionLocal
-    _engine = create_engine(url, connect_args={"check_same_thread": False}, **engine_kwargs)
-    _enable_foreign_keys(_engine)
+    # check_same_thread=False est une option specifique au driver SQLite
+    # (sqlite3) -- la passer au driver Postgres (psycopg) leverait une
+    # erreur, ce n'est un concept qui n'existe pas cote serveur SQL.
+    connect_args = {"check_same_thread": False} if _is_sqlite(url) else {}
+    _engine = create_engine(url, connect_args=connect_args, **engine_kwargs)
+    if _is_sqlite(url):
+        _enable_foreign_keys(_engine)
     Base.metadata.create_all(_engine)
     _SessionLocal = sessionmaker(bind=_engine, expire_on_commit=False)
 
 
 def init_db(path):
-    """Active la persistance SQLite vers `path` (hors depot, ex. .local_state/app.db)."""
+    """Active la persistance vers `path` (SQLite, hors depot, ex.
+    .local_state/app.db) -- SAUF si DATABASE_URL est definie, auquel cas
+    elle est utilisee a la place (Postgres partage entre instances)."""
+    url = os.environ.get("DATABASE_URL", "").strip()
+    if url:
+        _build(url)
+        return
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     _build(f"sqlite:///{path}")
 
