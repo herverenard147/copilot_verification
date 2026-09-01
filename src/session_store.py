@@ -44,7 +44,7 @@ from src.accounting import (
 
 RECEIPT_COLUMNS = ["receipt_id", "n_items", "items_sum", "subtotal", "tax",
                    "total", "line_sum_ok", "total_ok", "tax_ok", "anomaly",
-                   "category", "merchant"]
+                   "category", "merchant", "created_at"]
 ITEM_COLUMNS = ["receipt_id", "name", "quantity", "unit_price", "line_price", "category"]
 
 
@@ -81,6 +81,46 @@ def _failing_rule(row):
     return ("Anomalie non classée", None, None, None, None)
 
 
+def _period_bounds(period, date_from=None, date_to=None):
+    """Bornes [debut, fin) en UTC pour un libelle de periode. "Personnalisee"
+    utilise date_from/date_to (chaines ISO "AAAA-MM-JJ") tels que fournis par
+    le front ; sans eux, repli sur les 30 derniers jours."""
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    if period == "Personnalisée":
+        try:
+            start = datetime.fromisoformat(date_from).replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            start = now - timedelta(days=30)
+        try:
+            end = datetime.fromisoformat(date_to).replace(tzinfo=timezone.utc) + timedelta(days=1)
+        except (TypeError, ValueError):
+            end = now + timedelta(days=1)
+        return start, end
+    if period == "Trimestre en cours":
+        quarter_start_month = ((now.month - 1) // 3) * 3 + 1
+        start = now.replace(month=quarter_start_month, day=1, hour=0, minute=0, second=0, microsecond=0)
+        return start, now + timedelta(seconds=1)
+    # "Mois en cours" par defaut
+    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return start, now + timedelta(seconds=1)
+
+
+def _filter_by_period(receipts, period, date_from=None, date_to=None):
+    """Filtre le DataFrame de recus sur la periode demandee, via created_at
+    (voir UserSession._receipt_row). Un recu SANS created_at (corpus demo,
+    charge en bloc par load_demo -- jamais passe par add_receipt) est GARDE
+    dans toutes les periodes plutot qu'exclu : on n'a aucune date reelle pour
+    lui, l'exclure silencieusement serait plus trompeur que l'inclure."""
+    if "created_at" not in receipts.columns:
+        return receipts
+    start, end = _period_bounds(period, date_from, date_to)
+    parsed = pd.to_datetime(receipts["created_at"], errors="coerce", utc=True)
+    has_date = parsed.notna()
+    in_range = (parsed >= start) & (parsed < end)
+    return receipts[~has_date | in_range]
+
+
 class UserSession:
     """Les recus deposes/valides par UN utilisateur pendant SA session."""
 
@@ -114,7 +154,7 @@ class UserSession:
         } for it in receipt.items]
 
     def _receipt_row(self, rid, receipt, category, flags, merchant, doc_type,
-                     invoice_number, account_overrides, image_data):
+                     invoice_number, account_overrides, image_data, created_at=None):
         return {
             "receipt_id": rid, "n_items": len(receipt.items),
             "items_sum": receipt.items_sum(), "subtotal": receipt.subtotal,
@@ -126,6 +166,11 @@ class UserSession:
             # miniature base64 du recu (affichage detail). None pour la demo /
             # les anciens recus -> le front affiche un espace reserve.
             "image_data": image_data,
+            # horodatage de creation (ISO 8601 UTC) : utilise pour filtrer la
+            # comptabilite par periode (Mois/Trimestre/personnalisee). Absent
+            # pour les recus demo (load_demo ne passe pas par add_receipt) --
+            # get_accounting_data() les garde alors dans toutes les periodes.
+            "created_at": created_at or datetime.now(timezone.utc).isoformat(),
         }
 
     def add_receipt(self, receipt, category, flags, merchant=None, doc_type="ticket",
@@ -157,7 +202,8 @@ class UserSession:
         self.items = [it for it in self.items if int(it["receipt_id"]) != rid]
         self.items.extend(self._item_rows(rid, receipt, category))
         new_row = self._receipt_row(rid, receipt, category, flags, merchant, doc_type,
-                                    invoice_number, account_overrides, image_data)
+                                    invoice_number, account_overrides, image_data,
+                                    created_at=old.get("created_at"))
         self.receipts = [new_row if int(r["receipt_id"]) == rid else r for r in self.receipts]
         _save()
         _redis_save(self)
@@ -276,10 +322,15 @@ class UserSession:
         items = [it for it in self.items if int(it["receipt_id"]) == rid]
         return row, items
 
-    def get_accounting_data(self, period, payment_mode, country, category_account_map=None):
+    def get_accounting_data(self, period, payment_mode, country, category_account_map=None,
+                            date_from=None, date_to=None):
         receipts = self.receipts_df()
         if receipts.empty:
             return {"empty": True}
+
+        receipts = _filter_by_period(receipts, period, date_from, date_to)
+        if receipts.empty:
+            return {"empty": True, "period": period}
 
         # articles par recu (avec leur categorie individuelle) pour l'ecriture
         # multi-comptes -- voir journal_entry / _charge_lines.
@@ -344,7 +395,7 @@ class UserSession:
             total = _nan(r.get("total"))
             if total is not None:
                 parts.append(f"total : {int(total)}")
-            texts.append(" — ".join(parts))
+            texts.append(", ".join(parts))
         return texts
 
 

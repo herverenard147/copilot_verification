@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import API from "../api.js";
 import { money } from "../utils.js";
 import { toast } from "../toast.jsx";
+import { Icon } from "../Icons.jsx";
 
 function ImportSection({ onImported }) {
   const fileRef = useRef(null);
@@ -15,7 +16,7 @@ function ImportSection({ onImported }) {
     try {
       const d = await API.importBilan(file);
       setResult(d);
-      toast(`📥 ${d.imported} écriture(s) importée(s)`);
+      toast(`${d.imported} écriture(s) importée(s)`);
       onImported();
     } catch (e) {
       setError(e);
@@ -27,8 +28,8 @@ function ImportSection({ onImported }) {
 
   return (
     <div className="card">
-      <div className="section-head"><span className="label-caps">Importer un bilan / des écritures</span></div>
-      <div className="section-body stack">
+      <div className="card-head"><span className="card-head-label">Importer un bilan / des écritures</span></div>
+      <div className="card-body stack">
         <p className="body-sm muted">
           Un reçu d'achat ne peut pas dire ce qu'est votre capital ou votre chiffre d'affaires.
           Importez un fichier Excel, CSV ou Word contenant vos écritures (colonnes <b>Compte</b>,
@@ -54,8 +55,8 @@ function ImportSection({ onImported }) {
             )}
             {!result.balanced && (
               <p style={{ marginTop: "var(--xs)" }}>
-                ⚠️ Ce fichier seul n'est pas équilibré (débit {money(result.total_debit)} ≠
-                crédit {money(result.total_credit)}) — vérifiez qu'aucune ligne n'a été oubliée.
+                Ce fichier seul n'est pas équilibré (débit {money(result.total_debit)} ≠
+                crédit {money(result.total_credit)}), vérifiez qu'aucune ligne n'a été oubliée.
               </p>
             )}
           </div>
@@ -82,7 +83,7 @@ function ManualEntrySection({ onAdded }) {
         credit: credit === "" ? 0 : Number(credit),
       });
       setAccount(""); setLabel(""); setDebit(""); setCredit("");
-      toast("✅ Écriture ajoutée");
+      toast("Écriture ajoutée");
       onAdded();
     } catch (e2) {
       toast("Ajout impossible : " + e2.message);
@@ -93,8 +94,8 @@ function ManualEntrySection({ onAdded }) {
 
   return (
     <div className="card">
-      <div className="section-head"><span className="label-caps">Ajouter une écriture manuellement</span></div>
-      <div className="section-body">
+      <div className="card-head"><span className="card-head-label">Ajouter une écriture manuellement</span></div>
+      <div className="card-body">
         <form onSubmit={submit} className="row" style={{ alignItems: "flex-end" }}>
           <div>
             <label className="field" htmlFor="be-account">Compte</label>
@@ -115,7 +116,7 @@ function ManualEntrySection({ onAdded }) {
             <input id="be-credit" type="number" value={credit} onChange={(e) => setCredit(e.target.value)} />
           </div>
           <div>
-            <button className="btn btn--primary" type="submit" disabled={busy}>+ Ajouter</button>
+            <button className="btn btn--primary" type="submit" disabled={busy}><Icon name="plus" className="icon" style={{ width: 14, height: 14 }} />Ajouter</button>
           </div>
         </form>
       </div>
@@ -155,13 +156,17 @@ export default function BilanTab({ active, refreshToken, country, payment, isAut
 
   return (
     <div className="stack">
-      <div className="banner">ℹ️ {data.disclaimer}</div>
+      <div className="notice">
+        <Icon name="info" className="icon" />
+        <span>{data.disclaimer}</span>
+      </div>
 
       {!data.has_imported_entries && (
-        <div className="banner">
-          Ce bilan ne reflète pour l'instant que vos reçus (charges). Le capital, les
-          immobilisations, les stocks et le chiffre d'affaires ne peuvent pas venir d'un reçu
-          d'achat — importez-les ci-dessous pour un bilan complet.
+        <div className="notice">
+          <Icon name="info" className="icon" />
+          <span>Ce bilan ne reflète pour l'instant que vos reçus (charges). Le capital, les
+            immobilisations, les stocks et le chiffre d'affaires ne peuvent pas venir d'un reçu
+            d'achat, importez-les ci-dessous pour un bilan complet.</span>
         </div>
       )}
 
@@ -171,17 +176,23 @@ export default function BilanTab({ active, refreshToken, country, payment, isAut
         <div className={`kpi ${data.resultat_exercice < 0 ? "kpi--alert" : ""}`}>
           <div className="label-caps">Résultat de l'exercice</div><div className="value">{money(data.resultat_exercice)}</div>
         </div>
-        <div className="kpi"><div className="label-caps">Équilibre</div>
-          <div className="value">{data.balanced ? "✅" : "❌"}</div></div>
+        <div className={`kpi balance${data.balanced ? "" : " bad"}`}>
+          <span className="status-dot"><Icon name={data.balanced ? "check" : "warn"} className="icon" style={{ width: 18, height: 18 }} /></span>
+          <div><div className="label-caps">Équilibre</div>
+            <div className="value" style={{ fontSize: 16, color: data.balanced ? "var(--ok)" : "var(--alert)" }}>
+              {data.balanced ? "Équilibré" : "Déséquilibré"}
+            </div>
+          </div>
+        </div>
       </div>
       {!data.balanced && (
-        <div className="banner">⚠️ Actif ≠ Passif — une écriture importée est probablement
+        <div className="banner">Actif ≠ Passif : une écriture importée est probablement
           incomplète (une ligne sans sa contrepartie). Vérifiez les écritures importées.</div>
       )}
 
       <div className="grid-2">
         <div className="card">
-          <div className="section-head"><span className="label-caps">Actif</span></div>
+          <div className="card-head"><span className="card-head-label">Actif</span></div>
           <table>
             <thead><tr><th>Compte</th><th>Libellé</th><th className="num">Montant</th></tr></thead>
             <tbody>
@@ -193,7 +204,7 @@ export default function BilanTab({ active, refreshToken, country, payment, isAut
           </table>
         </div>
         <div className="card">
-          <div className="section-head"><span className="label-caps">Passif</span></div>
+          <div className="card-head"><span className="card-head-label">Passif</span></div>
           <table>
             <thead><tr><th>Compte</th><th>Libellé</th><th className="num">Montant</th></tr></thead>
             <tbody>
@@ -212,13 +223,16 @@ export default function BilanTab({ active, refreshToken, country, payment, isAut
           <ManualEntrySection onAdded={() => setLocalRefresh((n) => n + 1)} />
           {data.has_imported_entries && (
             <div className="btn-row">
-              <button className="btn btn--danger" onClick={handleClear}>🗑️ Effacer les écritures importées</button>
+              <button className="btn btn--danger" onClick={handleClear}>Effacer les écritures importées</button>
             </div>
           )}
         </>
       ) : (
-        <div className="banner">🔒 Connectez-vous pour importer un fichier d'écritures ou saisir
-          manuellement le capital / les immobilisations.</div>
+        <div className="lock-panel">
+          <Icon name="lock" className="icon" />
+          <span>Connectez-vous pour importer un fichier d'écritures ou saisir
+            manuellement le capital / les immobilisations.</span>
+        </div>
       )}
     </div>
   );

@@ -1,18 +1,20 @@
 import { money } from "./utils.js";
+import { Icon } from "./Icons.jsx";
 
 // Fidèlement porté de web/js/app.js (chip 3 états, contrôles, diagramme,
-// badges) — logique et libellés identiques, juste réécrits en JSX plutôt
-// qu'en chaînes de caractères.
+// badges) — logique et libellés identiques ; seule la présentation change
+// (icônes SVG plutôt qu'emoji, voir DECISIONS.md de la maquette).
+
+const CHIP_META = {
+  true: ["chip--ok", "check", "Contrôle conforme"],
+  false: ["chip--bad", "warn", "Anomalie détectée sur ce contrôle"],
+  null: ["chip--neutral", "minus", "Non vérifiable, information absente sur ce reçu"],
+};
 
 export function Chip({ label, value }) {
-  const map = {
-    true: ["chip--ok", "✅", "Contrôle conforme"],
-    false: ["chip--bad", "❌", "Anomalie détectée sur ce contrôle"],
-    null: ["chip--neutral", "➖", "Non vérifiable : information absente sur ce reçu"],
-  };
   const key = value === true ? "true" : value === false ? "false" : "null";
-  const [cls, icon, tip] = map[key];
-  return <span className={`chip ${cls}`} title={tip}>{icon} {label}</span>;
+  const [cls, icon, tip] = CHIP_META[key];
+  return <span className={`chip ${cls}`} title={tip}><Icon name={icon} className="icon" style={{ width: 13, height: 13 }} />{label}</span>;
 }
 
 function pct(rate) {
@@ -21,12 +23,15 @@ function pct(rate) {
 
 function Control({ title, value, msgs }) {
   const key = value === true ? "ok" : value === false ? "bad" : "none";
-  const meta = { ok: ["chip--ok", "✅"], bad: ["chip--bad", "❌"], none: ["chip--neutral", "➖"] }[key];
-  const explainCls = key === "bad" ? "control-explain control-explain--bad" : "control-explain";
+  const meta = { ok: ["chip--ok", "check"], bad: ["chip--bad", "warn"], none: ["chip--neutral", "minus"] }[key];
+  const detailCls = key === "bad" ? "control-detail control-detail--bad" : "control-detail";
   return (
-    <div className="control">
-      <span className={`chip ${meta[0]}`}>{meta[1]} {title}</span>
-      <div className={explainCls}>{msgs[key]}</div>
+    <div className="control-row">
+      <div className="control-head">
+        <span className={`chip ${meta[0]}`}><Icon name={meta[1]} className="icon" style={{ width: 13, height: 13 }} /></span>
+        <span className="control-title">{title}</span>
+      </div>
+      <div className={detailCls}>{msgs[key]}</div>
     </div>
   );
 }
@@ -47,23 +52,23 @@ export function ControlsPanel({ audit, balanced, receipt, journal, country }) {
     <>
       <Control title="Somme des articles" value={a.line_sum_ok} msgs={{
         ok: `La somme des articles (${money(itemsSum)}) correspond au sous-total (${money(sub)})`,
-        bad: `⚠️ La somme des articles (${money(itemsSum)}) ne correspond pas au sous-total annoncé (${money(sub)}) — écart de ${money(Math.abs(itemsSum - (sub || 0)))}. Vérifiez qu'aucun article ne manque.`,
-        none: "Le sous-total n'est pas indiqué sur ce reçu — vérification impossible",
+        bad: `La somme des articles (${money(itemsSum)}) ne correspond pas au sous-total annoncé (${money(sub)}), écart de ${money(Math.abs(itemsSum - (sub || 0)))}. Vérifiez qu'aucun article ne manque.`,
+        none: "Le sous-total n'est pas indiqué sur ce reçu, vérification impossible",
       }} />
       <Control title="Calcul du total" value={a.total_ok} msgs={{
-        ok: `Sous-total (${money(sub)}) + taxe (${money(tax || 0)}) = total (${money(total)}) ✓`,
-        bad: `⚠️ Sous-total (${money(sub)}) + taxe (${money(tax || 0)}) = ${money(attendu)}, mais le total indiqué est ${money(total)}. ${diff >= 0 ? "Il manque " + money(diff) : "Il y a " + money(-diff) + " de trop"} — peut-être un frais de service non extrait.`,
-        none: "Le sous-total ou le total n'est pas indiqué — vérification impossible",
+        ok: `Sous-total (${money(sub)}) + taxe (${money(tax || 0)}) = total (${money(total)})`,
+        bad: `Sous-total (${money(sub)}) + taxe (${money(tax || 0)}) = ${money(attendu)}, mais le total indiqué est ${money(total)}. ${diff >= 0 ? "Il manque " + money(diff) : "Il y a " + money(-diff) + " de trop"}, peut-être un frais de service non extrait.`,
+        none: "Le sous-total ou le total n'est pas indiqué, vérification impossible",
       }} />
       <Control title="Taux de taxe" value={a.tax_ok} msgs={{
-        ok: `Taxe de ${rate != null ? pct(rate) : "—"} — cohérent avec le taux ${ctyLabel} (≈${expRate} %)`,
-        bad: `⚠️ Taxe de ${rate != null ? pct(rate) : "?"} — inhabituel pour le pays sélectionné (attendu ≈${expRate} %). Vérifiez le montant de la taxe.`,
-        none: "Pas de taxe sur ce reçu — non vérifiable",
+        ok: `Taxe de ${rate != null ? pct(rate) : "?"}, cohérent avec le taux ${ctyLabel} (≈${expRate} %)`,
+        bad: `Taxe de ${rate != null ? pct(rate) : "?"}, inhabituel pour le pays sélectionné (attendu ≈${expRate} %). Vérifiez le montant de la taxe.`,
+        none: "Pas de taxe sur ce reçu, non vérifiable",
       }} />
       <Control title="Équilibre comptable" value={balanced} msgs={{
-        ok: `Total des débits (${money(td)}) = total des crédits (${money(tc)}) ✓`,
-        bad: "⚠️ L'écriture est déséquilibrée — contactez un comptable",
-        none: "Écriture non générée — données insuffisantes",
+        ok: `Total des débits (${money(td)}) = total des crédits (${money(tc)})`,
+        bad: "L'écriture est déséquilibrée, contactez un comptable",
+        none: "Écriture non générée, données insuffisantes",
       }} />
     </>
   );
@@ -106,15 +111,15 @@ export function receiptStatus(r) {
   if (fails === 0 && r.anomaly) fails = 1;
   if (fails > 0) return {
     status: "review", rowClass: "receipt-review",
-    badge: <span className="badge badge--review">⚠️ {fails} point{fails > 1 ? "s" : ""} à vérifier</span>,
+    badge: <span className="badge badge--review"><Icon name="warn" className="icon" style={{ width: 13, height: 13 }} />{fails} point{fails > 1 ? "s" : ""} à vérifier</span>,
   };
   if (flags.some((f) => f === true)) return {
     status: "conforme", rowClass: "",
-    badge: <span className="badge badge--verified">✓ Vérifié</span>,
+    badge: <span className="badge badge--verified"><Icon name="check" className="icon" style={{ width: 13, height: 13 }} />Vérifié</span>,
   };
   return {
     status: "nodata", rowClass: "",
-    badge: <span className="badge badge--nodata">— Données insuffisantes</span>,
+    badge: <span className="badge badge--nodata"><Icon name="minus" className="icon" style={{ width: 13, height: 13 }} />Données insuffisantes</span>,
   };
 }
 
@@ -128,30 +133,30 @@ export function receiptLabel(r) {
 
 export function EngineBadge({ engine }) {
   if (engine === "llm_fallback")
-    return <span className="badge badge--fallback" title="Un modèle d'IA généraliste (LLM) a lu l'image parce que Donut, le modèle spécialisé, n'y arrivait pas (ex. reçu hors de son domaine).">📖 Lecture par IA de secours</span>;
+    return <span className="badge badge--fallback" title="Un modèle d'IA généraliste (LLM) a lu l'image parce que le modèle spécialisé n'y arrivait pas (ex. reçu hors de son domaine)."><Icon name="cpu" className="icon" style={{ width: 13, height: 13 }} />Lecture par IA de secours</span>;
   if (engine === "fallback_indisponible")
-    return <span className="badge badge--fallback" title="Aucun modèle de secours accessible avec la clé Groq configurée.">⚠️ Lecture de secours indisponible — modèle non accessible avec cette clé</span>;
-  return <span className="badge badge--donut" title="Donut : modèle spécialisé reçus, entraîné sur CORD (tickets indonésiens).">🍩 Lecture par Donut (modèle spécialisé)</span>;
+    return <span className="badge badge--fallback" title="Aucun modèle de secours accessible avec la clé Groq configurée."><Icon name="warn" className="icon" style={{ width: 13, height: 13 }} />Lecture de secours indisponible, modèle non accessible avec cette clé</span>;
+  return <span className="badge badge--donut" title="Modèle spécialisé, entraîné pour la lecture de reçus."><Icon name="cpu" className="icon" style={{ width: 13, height: 13 }} />Lecture par modèle spécialisé</span>;
 }
 
 export function FlowDiagram() {
   return (
     <details className="flow-details">
-      <summary>❔ Comment ça marche ?</summary>
+      <summary><Icon name="info" className="icon" style={{ width: 14, height: 14 }} />Comment ça marche ?</summary>
       <div className="flow-wrap">
         <svg viewBox="0 0 600 110" className="flow-svg" role="img" aria-label="Article acheté, puis compte comptable, puis écriture">
           <rect x="10" y="20" width="170" height="60" rx="8" className="flow-box" />
-          <text x="95" y="46" className="flow-label" textAnchor="middle">🛒 Article acheté</text>
+          <text x="95" y="46" className="flow-label" textAnchor="middle">Article acheté</text>
           <text x="95" y="65" className="flow-sub" textAnchor="middle">ex. « Ramette papier »</text>
           <line x1="185" y1="50" x2="211" y2="50" className="flow-arrow" />
           <polygon points="211,43 226,50 211,57" className="flow-arrowhead" />
           <rect x="232" y="20" width="170" height="60" rx="8" className="flow-box" />
-          <text x="317" y="46" className="flow-label" textAnchor="middle">🗂️ Compte comptable</text>
-          <text x="317" y="65" className="flow-sub" textAnchor="middle">ex. 601 — Achats</text>
+          <text x="317" y="46" className="flow-label" textAnchor="middle">Compte comptable</text>
+          <text x="317" y="65" className="flow-sub" textAnchor="middle">ex. 601 (Achats)</text>
           <line x1="407" y1="50" x2="433" y2="50" className="flow-arrow" />
           <polygon points="433,43 448,50 433,57" className="flow-arrowhead" />
           <rect x="454" y="20" width="146" height="60" rx="8" className="flow-box flow-box--primary" />
-          <text x="527" y="46" className="flow-label flow-label--on-primary" textAnchor="middle">📒 Écriture</text>
+          <text x="527" y="46" className="flow-label flow-label--on-primary" textAnchor="middle">Écriture</text>
           <text x="527" y="65" className="flow-sub flow-label--on-primary" textAnchor="middle">Débit / Crédit</text>
         </svg>
         <p className="muted body-sm">Chaque article est rattaché à un compte comptable selon sa catégorie
@@ -162,36 +167,19 @@ export function FlowDiagram() {
   );
 }
 
-export function QuestionFlowDiagram() {
-  return (
-    <div className="flow-wrap flow-wrap--static" style={{ marginBottom: "var(--md)" }}>
-      <svg viewBox="0 0 600 110" className="flow-svg" role="img" aria-label="Votre question, puis recherche parmi vos reçus, puis réponse construite à partir de vrais documents">
-        <rect x="10" y="20" width="170" height="60" rx="8" className="flow-box" />
-        <text x="95" y="46" className="flow-label" textAnchor="middle">💬 Votre question</text>
-        <text x="95" y="65" className="flow-sub" textAnchor="middle">ex. « boissons ? »</text>
-        <line x1="185" y1="50" x2="211" y2="50" className="flow-arrow" />
-        <polygon points="211,43 226,50 211,57" className="flow-arrowhead" />
-        <rect x="232" y="20" width="170" height="60" rx="8" className="flow-box" />
-        <text x="317" y="46" className="flow-label" textAnchor="middle">🔎 Recherche</text>
-        <text x="317" y="65" className="flow-sub" textAnchor="middle">parmi vos reçus</text>
-        <line x1="407" y1="50" x2="433" y2="50" className="flow-arrow" />
-        <polygon points="433,43 448,50 433,57" className="flow-arrowhead" />
-        <rect x="454" y="20" width="146" height="60" rx="8" className="flow-box flow-box--primary" />
-        <text x="527" y="46" className="flow-label flow-label--on-primary" textAnchor="middle">✅ Réponse</text>
-        <text x="527" y="65" className="flow-sub flow-label--on-primary" textAnchor="middle">à partir de vos reçus</text>
-      </svg>
-      <p className="muted body-sm">La réponse n'est pas inventée : elle est construite à partir des reçus réels retrouvés ci-dessous.</p>
-    </div>
-  );
-}
-
 export function ImageOrPlaceholder({ file, imageData }) {
-  const src = file ? URL.createObjectURL(file) : (imageData || null);
+  // Un fichier local n'est previsualisable directement QUE si c'est deja une
+  // image (URL.createObjectURL d'un PDF ne s'affiche pas dans un <img>) :
+  // pour un PDF, on attend la miniature rendue cote serveur (imageData),
+  // generee a partir de la page rasterisee (voir src/preprocess.py).
+  const isImageFile = file && file.type && file.type.startsWith("image/");
+  const src = isImageFile ? URL.createObjectURL(file) : (imageData || null);
   if (src) return <img className="receipt-img" src={src} alt="Image du reçu" />;
   return (
     <div className="card">
       <div className="section-body muted" style={{ textAlign: "center", padding: "var(--xl) var(--md)" }}>
-        <div style={{ fontSize: 32 }}>🧾</div>Image non disponible pour ce reçu
+        <Icon name="image" className="icon" style={{ width: 32, height: 32, margin: "0 auto 8px" }} />
+        Image non disponible pour ce reçu
       </div>
     </div>
   );

@@ -14,6 +14,7 @@ import logging
 import math
 import os
 import re
+import sys
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -28,18 +29,53 @@ from pydantic import BaseModel
 
 logger = logging.getLogger("copilote.api")
 
+
+def _load_dotenv(path=".env"):
+    """Charge un fichier .env minimal (KEY=value par ligne, # = commentaire)
+    dans os.environ, SANS ecraser une variable deja definie par le vrai
+    environnement (celui-ci reste prioritaire, comme un vrai deploiement).
+    Pas de dependance nouvelle (pas de python-dotenv) : juste GROQ_API_KEY et
+    consorts, un fichier hors depot (voir .gitignore) pour un dev local sans
+    avoir a l'exporter a chaque session de terminal. Absent -> no-op silencieux."""
+    p = Path(path)
+    if not p.exists():
+        return
+    try:
+        for line in p.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key, value = key.strip(), value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+    except Exception:
+        logger.warning("Lecture de %s impossible, variables ignorees.", path)
+
+
+# JAMAIS sous pytest : les tests doivent rester isoles de tout secret/appel
+# reseau reel (voir la discipline "aucune I/O disque pendant les tests" deja
+# en place pour la persistance). "pytest" est present dans sys.modules des
+# l'import de api.py par la suite, avant meme le premier test -- fiable,
+# contrairement a PYTEST_CURRENT_TEST qui n'existe qu'une fois un test demarre.
+if "pytest" not in sys.modules:
+    _load_dotenv()
+
 from src.receipt import Receipt, filter_invoice_headers, find_invoice_number
 from src.rules import audit, TAX_RATES
 from src.accounting import (
     journal_entry, is_balanced, vat_recoverable, vat_summary, expense_report,
     apply_account_overrides, DISCLAIMER, CHART_OF_ACCOUNTS, PAYMENT_ACCOUNTS, CHARGE_ACCOUNTS,
 )
-from src.preprocess import preprocess_image, resolution_info, image_to_thumbnail_datauri
+from src.preprocess import (
+    preprocess_image, resolution_info, image_to_thumbnail_datauri,
+    is_pdf, pdf_first_page_to_image,
+)
 from src.extractor import extract
 from src.llm import (
     extract_receipt_via_vision, VisionUnavailable,
     resolve_key, key_source, set_session_key, clear_session_key,
-    classify_models, select_vision_model,
+    classify_models, select_vision_model, classify_is_receipt,
 )
 from src import session_store
 from src import auth as auth_mod
@@ -111,7 +147,7 @@ async def _lifespan(app):
             auth_mod.close_redis()
 
 
-app = FastAPI(title="Copilote de reçus — API", lifespan=_lifespan)
+app = FastAPI(title="Copilote de reçus : API", lifespan=_lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +157,10 @@ app = FastAPI(title="Copilote de reçus — API", lifespan=_lifespan)
 # d'autre a changer.
 # ---------------------------------------------------------------------------
 SESSION_COOKIE = "sid"
+
+# Nombre de recus qu'une session SANS COMPTE peut enregistrer avant de devoir
+# se connecter (voir POST /api/validate) -- ignore en mode demo (corpus CORD).
+ANON_RECEIPT_LIMIT = 5
 
 # Purge des sessions abandonnees (voir session_store.evict_idle_sessions) :
 # declenchee ici plutot que par un thread dedie, throttlee pour rester
@@ -501,7 +541,28 @@ def api_auth_me(request: Request):
     if user_id is None:
         return fail("Non connecté.", status=401, engine="auth",
                     suggestions=["Se connecter", "Créer un compte"])
-    return ok({"user_id": user_id})
+    profile = auth_mod.get_profile(user_id) or {}
+    return ok({"user_id": user_id, **profile})
+
+
+class ProfilePayload(BaseModel):
+    full_name: str | None = None
+    job_title: str | None = None
+    company: str | None = None
+
+
+@app.put("/api/auth/profile")
+@safe
+def api_auth_update_profile(payload: ProfilePayload, request: Request):
+    user_id, error = _require_user(request)
+    if error:
+        return error
+    try:
+        auth_mod.update_profile(user_id, full_name=payload.full_name,
+                                job_title=payload.job_title, company=payload.company)
+    except ValueError as exc:
+        return fail(str(exc), status=422, engine="auth")
+    return ok(auth_mod.get_profile(user_id))
 
 
 class ConsentPayload(BaseModel):
@@ -550,9 +611,17 @@ def api_auth_export(request: Request):
     user_id, error = _require_user(request)
     if error:
         return error
-    account_session = session_store.get_session(f"user:{user_id}")
     with db_mod.get_db() as s:
         user = s.get(User, user_id)
+        if user is None:
+            # Jeton signe valide mais compte deja supprime (ex. autre onglet/
+            # appareil ayant supprime le compte entre-temps) : traite comme
+            # une deconnexion propre plutot que de planter.
+            response = fail("Session expirée.", status=401, engine="auth",
+                            suggestions=["Se reconnecter"])
+            response.delete_cookie(auth_mod.AUTH_COOKIE)
+            return response
+        account_session = session_store.get_session(f"user:{user_id}")
         consents = (s.query(Consent).filter_by(user_id=user_id)
                    .order_by(Consent.created_at).all())
         corrs = (s.query(Correction).filter_by(user_id=user_id)
@@ -722,14 +791,28 @@ def api_extract(request: Request, file: UploadFile = File(...), country: str = F
     if not raw:
         return fail("Fichier vide.",
                     detail="Le fichier reçu ne contient aucune donnée.", status=422)
-    try:
-        image = Image.open(io.BytesIO(raw))
-        image.load()
-    except Exception:
-        logger.exception("Ouverture image échouée (%s octets)", len(raw))
-        return fail("Impossible de lire ce reçu",
-                    detail="Le fichier n'est pas une image valide (JPG ou PNG attendu).",
-                    status=422)
+
+    if is_pdf(raw):
+        # Facture PDF : on ne traite que la 1ere page (une facture tient
+        # rarement sur plusieurs), rasterisee en image puis injectee dans le
+        # MEME pipeline que pour une photo -- aucune autre branche a dupliquer.
+        try:
+            image = pdf_first_page_to_image(raw)
+        except RuntimeError as exc:
+            logger.warning("PDF illisible (%s octets) : %s", len(raw), exc)
+            return fail("Impossible de lire ce PDF", detail=str(exc), status=422,
+                        suggestions=["Réessayer avec un autre fichier",
+                                     "Exporter la facture en JPG/PNG",
+                                     "Saisir les données manuellement"])
+    else:
+        try:
+            image = Image.open(io.BytesIO(raw))
+            image.load()
+        except Exception:
+            logger.exception("Ouverture image échouée (%s octets)", len(raw))
+            return fail("Impossible de lire ce reçu",
+                        detail="Le fichier n'est pas une image ou un PDF valide (JPG, PNG ou PDF attendu).",
+                        status=422)
 
     # Garde-fou de resolution (bug E10) : trop peu de pixels -> le modele
     # hallucine du texte sur du flou. On rejette AVANT toute extraction.
@@ -776,9 +859,33 @@ def _run_extraction_job(pre_img, pre_info, country, payment_mode, merchant, doc_
     construction du bundle) -- execute HORS du thread de la requete HTTP
     (voir src/jobs.py, GET /api/extract/status/{job_id}). Renvoie le bundle
     complet, sous la meme forme qu'avant le decouplage (le front n'a presque
-    rien a changer cote consommation du resultat, seulement cote polling)."""
+    rien a changer cote consommation du resultat, seulement cote polling).
+
+    Peut aussi renvoyer un bundle de REJET ({"rejected": True, ...}) plutot
+    qu'une exception : jobs.py ne garde que str(exc) sur une erreur (perd le
+    detail/suggestions structures), alors qu'un rejet reste un job "done"
+    normal -- api_extract_status() le detecte et repond via fail()."""
     engine = "donut"
     fallback_note = None
+    groq_key = resolve_key("groq")[0]
+
+    # 0) Garde-fou hors-sujet : verifie AVANT toute extraction que l'image
+    # ressemble a un recu/une facture, plutot que de laisser Donut forcer un
+    # resultat sur une photo sans rapport. Ignore silencieusement sans cle
+    # Groq (aucun modele de classification disponible dans ce cas).
+    if groq_key:
+        try:
+            is_receipt, reason = classify_is_receipt(pre_img, api_key=groq_key)
+            if not is_receipt:
+                return {
+                    "rejected": True,
+                    "error": "Cette image ne ressemble pas à un reçu ou une facture",
+                    "detail": reason or "Aucun ticket de caisse ni facture n'a été reconnu sur cette image.",
+                    "suggestions": ["Vérifier que la photo montre bien un reçu ou une facture",
+                                     "Saisir les données manuellement"],
+                }
+        except Exception as exc:
+            logger.warning("Classification hors-sujet ignorée : %s", type(exc).__name__)
 
     # 1) Donut (son domaine : reçus indonesiens CORD)
     try:
@@ -792,7 +899,6 @@ def _run_extraction_job(pre_img, pre_info, country, payment_mode, merchant, doc_
     # 2) Fallback vision ASSUME : pays CI (hors domaine) OU sortie Donut vide
     donut_incoherent = (not receipt.items) and (not receipt.total)
     want_fallback = (country == "CI") or donut_incoherent
-    groq_key = resolve_key("groq")[0]
     if want_fallback and groq_key:
         try:
             vision_pred = extract_receipt_via_vision(pre_img)
@@ -802,7 +908,7 @@ def _run_extraction_job(pre_img, pre_info, country, payment_mode, merchant, doc_
         except VisionUnavailable:
             # Aucun modele vision accessible : degradation gracieuse EXPLICITE
             # (pas un 404 silencieux). On ne logue pas la cle.
-            fallback_note = ("Fallback vision indisponible — modèle non accessible "
+            fallback_note = ("Fallback vision indisponible, modèle non accessible "
                              "avec cette clé.")
             if (not receipt.items) and (not receipt.total):
                 engine = "fallback_indisponible"
@@ -813,6 +919,13 @@ def _run_extraction_job(pre_img, pre_info, country, payment_mode, merchant, doc_
                 engine = "fallback_indisponible"
     elif want_fallback:
         fallback_note = "Fallback vision non tenté : aucune clé Groq configurée."
+
+    # NB : contrairement au garde-fou hors-sujet (etape 0, avant Donut), on ne
+    # rejette PAS ici juste parce que Donut+fallback n'ont rien trouve -- un
+    # vrai recu hors du domaine de Donut (ex. ivoirien) sans cle vision degrade
+    # deja proprement vers engine="fallback_indisponible" avec un bundle vide
+    # que l'utilisateur complete a la main (voir AnalyzeTab "Saisir manuellement").
+    # Rejeter systematiquement casserait ce chemin, deja teste et voulu.
 
     # Post-traitement FACTURE (regles simples) : retire les lignes d'en-tete
     # (nom/adresse/email captes comme 'articles' sans montant, en tete de liste).
@@ -864,6 +977,10 @@ def api_extract_status(job_id: str):
                     status=400, engine="server",
                     suggestions=["Réessayer", "Saisir les données manuellement"])
     result = dict(job["result"])
+    if result.get("rejected"):
+        return fail(result["error"], detail=result.get("detail", ""),
+                    status=422, engine="rejected",
+                    suggestions=result.get("suggestions"))
     result["status"] = "done"
     return ok(result)
 
@@ -921,6 +1038,20 @@ def api_validate(payload: ValidatePayload, request: Request):
         session, error = _require_session(request)
         if error:
             return error
+        # Limite d'utilisation anonyme (Tache 6) : une session sans compte
+        # peut analyser et SAUVEGARDER un nombre limite de recus avant de
+        # devoir se connecter. Ignoree en mode demo (corpus CORD, pas de la
+        # vraie utilisation) et sans objet en mode prod (deja bloque plus tot
+        # par _require_session -- l'acces anonyme y est refuse d'entree).
+        if (_current_user(request) is None and not session.demo_mode
+                and len(session.receipts) >= ANON_RECEIPT_LIMIT):
+            return fail(
+                "Limite de la session anonyme atteinte",
+                detail=(f"Une session sans compte est limitée à {ANON_RECEIPT_LIMIT} reçus "
+                        "enregistrés. Créez un compte gratuit pour continuer sans limite."),
+                status=403, engine="auth",
+                suggestions=["Créer un compte", "Se connecter"],
+            )
         _capture_account_preference(request, bundle)
         new_id = session.add_receipt(receipt, payload.category, bundle["audit"],
                                      merchant=_nan(payload.merchant), doc_type=payload.doc_type,
@@ -1044,13 +1175,15 @@ def api_receipt_delete(receipt_id: int, request: Request):
 @app.get("/api/accounting")
 @safe
 def api_accounting(request: Request, period: str = "Mois en cours",
-                   payment_mode: str = "cash", country: str = "ID"):
+                   payment_mode: str = "cash", country: str = "ID",
+                   date_from: str = None, date_to: str = None):
     # Comptabilise les recus de CETTE session, PAS le corpus CORD.
     session, error = _require_session(request)
     if error:
         return error
     data = session.get_accounting_data(period, payment_mode, country,
-                                       category_account_map=_category_account_map(request))
+                                       category_account_map=_category_account_map(request),
+                                       date_from=date_from, date_to=date_to)
     data["demo_mode"] = session.demo_mode
     return ok(data)
 
@@ -1225,7 +1358,7 @@ def api_search(payload: SearchPayload, request: Request):
         # Session vide : on cherche dans le CORPUS DE REFERENCE, clairement signale.
         results = search(question, encoder, ref_index, ref_summaries, k=5)
         scope, reference_corpus = "reference", True
-        corpus_note = ("Corpus de référence CORD — ce ne sont pas vos dépenses. "
+        corpus_note = ("Corpus de référence CORD, ce ne sont pas vos dépenses. "
                        "Analysez un reçu pour interroger les vôtres.")
 
     # receipt_id resolu depuis le texte ("Reçu #N" ou "Reçu N :") UNIQUEMENT si

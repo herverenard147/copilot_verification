@@ -61,6 +61,9 @@ def test_pas_de_capture_sans_raw_json():
 
 def test_pas_de_capture_sans_consentement():
     client.post("/api/auth/register", json={"email": "noconsent@x.com", "password": "motdepasse123"})
+    # register_user() accorde le consentement par defaut (Tache 6) : on le
+    # retire explicitement pour tester le cas SANS consentement.
+    client.post("/api/auth/consent", json={"consent_type": "training_data", "granted": False})
     r = client.post("/api/validate", json=_payload(raw_json=RAW))
     assert r.status_code == 200
     with db.get_db() as s:

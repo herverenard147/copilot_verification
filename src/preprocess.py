@@ -11,6 +11,8 @@ Chaque etape est isolee et testable ; le redressement est enveloppe dans un
 try/except car il peut echouer sur une image atypique (aucun bord franc) --
 dans ce cas on renvoie l'image telle quelle plutot que de planter.
 """
+import io
+
 import numpy as np
 from PIL import Image
 
@@ -19,6 +21,45 @@ try:
     _HAS_CV2 = True
 except ImportError:          # degradation : sans OpenCV, on fait le minimum via PIL
     _HAS_CV2 = False
+
+try:
+    import pymupdf as fitz  # PyMuPDF -- rasterise un PDF sans dependre de poppler (systeme)
+    _HAS_FITZ = True
+except ImportError:
+    _HAS_FITZ = False
+
+PDF_MAGIC = b"%PDF-"
+PDF_RENDER_DPI = 200          # net pour Donut sans generer un fichier demesure
+
+
+def is_pdf(raw_bytes):
+    """Detection par CONTENU (signature %PDF-), jamais par extension/Content-
+    Type -- un nom de fichier ou un en-tete peut mentir, les octets non."""
+    return raw_bytes[:5] == PDF_MAGIC
+
+
+def pdf_first_page_to_image(raw_bytes, dpi=PDF_RENDER_DPI):
+    """Rasterise la PREMIERE page d'un PDF (une facture tient rarement sur
+    plusieurs pages ; le pipeline existant -- Donut, fallback vision -- ne
+    traite qu'une image) en image PIL RGB. Leve RuntimeError si PyMuPDF
+    n'est pas installe ou si le PDF est illisible/corrompu/protege, avec un
+    message humain que l'appelant (api.py) peut renvoyer tel quel."""
+    if not _HAS_FITZ:
+        raise RuntimeError("Support PDF indisponible sur ce serveur.")
+    try:
+        doc = fitz.open(stream=raw_bytes, filetype="pdf")
+        if doc.page_count < 1:
+            raise RuntimeError("Ce PDF ne contient aucune page.")
+        page = doc.load_page(0)
+        zoom = dpi / 72.0
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+        img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+        doc.close()
+        return img
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError("PDF illisible ou protégé.") from exc
 
 
 TARGET_HEIGHT = 1280         # hauteur visee : assez grand pour Donut, pas trop lourd

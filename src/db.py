@@ -16,7 +16,7 @@ import os
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -41,6 +41,26 @@ def _enable_foreign_keys(engine):
         cursor.close()
 
 
+def _migrate_add_columns(engine):
+    """create_all() ne cree que les tables ABSENTES : une colonne ajoutee au
+    modele (ex. User.full_name) n'apparait jamais sur une base existante sans
+    ca. Migration minimale et idempotente (pas d'Alembic dans ce projet) :
+    compare les colonnes du modele a celles reellement en base et ajoute
+    celles qui manquent, en NULL/valeur par defaut -- jamais destructif."""
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue  # deja creee a neuf par create_all(), a jour
+            existing_cols = {c["name"] for c in inspector.get_columns(table.name)}
+            for col in table.columns:
+                if col.name in existing_cols:
+                    continue
+                col_type = col.type.compile(engine.dialect)
+                conn.execute(text(f"ALTER TABLE {table.name} ADD COLUMN {col.name} {col_type}"))
+
+
 def _build(url, **engine_kwargs):
     global _engine, _SessionLocal
     # check_same_thread=False est une option specifique au driver SQLite
@@ -51,6 +71,7 @@ def _build(url, **engine_kwargs):
     if _is_sqlite(url):
         _enable_foreign_keys(_engine)
     Base.metadata.create_all(_engine)
+    _migrate_add_columns(_engine)
     _SessionLocal = sessionmaker(bind=_engine, expire_on_commit=False)
 
 

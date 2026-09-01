@@ -21,21 +21,17 @@ _backend = None
 _client = None
 _model_name = None
 
-# Modeles vision Groq candidats, par ORDRE DE PREFERENCE. On ne code plus un
-# nom en dur : la disponibilite des modeles Groq evolue (un nom code en dur a
-# provoque des 404 model_not_found). On interroge l'API des modeles et on
-# retient le premier candidat REELLEMENT present pour la cle courante. Une
+# Modeles vision Groq PREFERES, essayes en premier s'ils sont disponibles.
+# JAMAIS la seule source de verite : la gamme Groq change regulierement (ces
+# noms eux-memes ont fini par disparaitre de l'API et provoquer des 404
+# model_not_found silencieux). La disponibilite REELLE vient du champ
+# input_modalities renvoye par l'API (voir list_available_models) -- un nom
+# fige n'est plus qu'une preference d'ordre, jamais un filtre bloquant. Une
 # surcharge explicite reste possible via GROQ_VISION_MODEL (placee en tete).
-_VISION_MODEL_CANDIDATES = [
+_VISION_MODEL_PREFERRED = [
     "meta-llama/llama-4-maverick-17b-128e-instruct",
     "meta-llama/llama-4-scout-17b-16e-instruct",
-    "llama-3.2-90b-vision-preview",
-    "llama-3.2-11b-vision-preview",
 ]
-
-# Indices de nom permettant de reconnaitre un modele multimodal dans la liste
-# renvoyee par l'API (pour l'affichage GET /api/settings/models).
-_VISION_HINTS = ("vision", "scout", "maverick", "llama-4")
 
 
 class VisionUnavailable(RuntimeError):
@@ -117,9 +113,14 @@ def clear_session_key(provider):
 # Modeles disponibles pour la cle courante (interrogation + selection vision)
 # ---------------------------------------------------------------------------
 def list_available_models(provider="groq", force=False):
-    """IDs de modeles disponibles pour la cle courante, en cache pour la duree
-    du processus (par valeur de cle). Leve RuntimeError sans cle. Les erreurs
-    reseau/SDK remontent a l'appelant."""
+    """Modeles disponibles pour la cle courante : [{"id", "input_modalities"}],
+    en cache pour la duree du processus (par valeur de cle). Leve RuntimeError
+    sans cle. Les erreurs reseau/SDK remontent a l'appelant.
+
+    input_modalities (ex. ["text","image"]) est la source de verite RENVOYEE
+    PAR L'API pour savoir si un modele accepte des images -- jamais un nom
+    code en dur, dont la validite se perime des que Groq fait evoluer sa
+    gamme (voir _VISION_MODEL_PREFERRED)."""
     key, _ = resolve_key(provider)
     if not key:
         raise RuntimeError("Aucune cle : impossible de lister les modeles")
@@ -127,32 +128,39 @@ def list_available_models(provider="groq", force=False):
         return _model_list_cache[key]
     from groq import Groq
     response = Groq(api_key=key).models.list()
-    ids = sorted(m.id for m in response.data)
-    _model_list_cache[key] = ids
-    return ids
+    models = sorted(
+        [{"id": m.id, "input_modalities": list(getattr(m, "input_modalities", None) or [])}
+         for m in response.data],
+        key=lambda m: m["id"],
+    )
+    _model_list_cache[key] = models
+    return models
 
 
 def select_vision_model(provider="groq"):
-    """1er modele vision REELLEMENT disponible selon l'ordre de preference,
-    ou None si aucun candidat n'est present pour cette cle. Une surcharge
-    GROQ_VISION_MODEL est essayee en priorite."""
-    available = set(list_available_models(provider))
+    """1er modele vision REELLEMENT disponible pour cette cle (input_modalities
+    contient "image"), ou None si aucun n'est accessible. Un modele PREFERE
+    (ou la surcharge GROQ_VISION_MODEL) est choisi en priorite s'il fait
+    partie des modeles vision reellement presents ; sinon, le premier modele
+    vision disponible (peu importe son nom) est utilise -- jamais None juste
+    parce qu'un nom fige a change cote Groq."""
+    models = list_available_models(provider)
+    vision_ids = {m["id"] for m in models if "image" in m["input_modalities"]}
+    if not vision_ids:
+        return None
     override = os.environ.get("GROQ_VISION_MODEL")
-    candidates = ([override] if override else []) + _VISION_MODEL_CANDIDATES
-    for name in candidates:
-        if name in available:
+    for name in ([override] if override else []) + _VISION_MODEL_PREFERRED:
+        if name in vision_ids:
             return name
-    return None
+    return sorted(vision_ids)[0]
 
 
 def classify_models(provider="groq"):
     """Separe les modeles disponibles en {vision, text} pour l'affichage
-    Reglages. La detection vision s'appuie sur les candidats connus + des
-    indices de nom (vision/scout/maverick/llama-4)."""
-    ids = list_available_models(provider)
-    known = set(_VISION_MODEL_CANDIDATES)
-    vision = [m for m in ids if m in known or any(h in m.lower() for h in _VISION_HINTS)]
-    text = [m for m in ids if m not in vision]
+    Reglages, selon input_modalities (source de verite = l'API)."""
+    models = list_available_models(provider)
+    vision = [m["id"] for m in models if "image" in m["input_modalities"]]
+    text = [m["id"] for m in models if m["id"] not in vision]
     return {"vision": vision, "text": text}
 
 
@@ -327,3 +335,51 @@ def extract_receipt_via_vision(image, api_key=None, model=None):
     parsed.setdefault("sub_total", {})
     parsed.setdefault("total", {})
     return parsed
+
+
+_CLASSIFY_PROMPT = """Regarde cette image. Est-ce la photo ou le scan d'un
+reçu, ticket de caisse ou facture (un document commercial listant des
+articles/services et un montant à payer) ?
+
+Réponds UNIQUEMENT par un objet JSON valide, sans texte autour :
+{"is_receipt": true ou false, "reason": "explication en une courte phrase en français"}"""
+
+
+def classify_is_receipt(image, api_key=None, model=None):
+    """Verifie, via un modele vision, que l'image ressemble a un recu/ticket/
+    facture AVANT de lancer l'extraction complete. Appele par l'API pour
+    rejeter tot une image hors-sujet plutot que de laisser Donut halluciner
+    une fausse ecriture sur une photo sans rapport.
+
+    Leve une exception si aucune cle/modele vision n'est disponible : c'est a
+    l'appelant de decider de la degradation (voir api.py, ce garde-fou est
+    ignore silencieusement si aucune cle Groq n'est configuree).
+    """
+    api_key = api_key or resolve_key("groq")[0]
+    if not api_key:
+        raise RuntimeError("Aucune cle Groq : classification hors-sujet impossible")
+    if model is None:
+        model = select_vision_model("groq")
+        if model is None:
+            raise VisionUnavailable("Aucun modele vision accessible avec cette cle Groq")
+
+    from groq import Groq
+    client = Groq(api_key=api_key)
+    data_uri = _pil_to_data_uri(image)
+
+    response = client.chat.completions.create(
+        model=model,
+        temperature=0,
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": _CLASSIFY_PROMPT},
+                {"type": "image_url", "image_url": {"url": data_uri}},
+            ],
+        }],
+    )
+    raw = response.choices[0].message.content
+    cleaned = re.sub(r"```json|```", "", raw).strip()
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    parsed = json.loads(match.group(0) if match else cleaned)
+    return bool(parsed.get("is_receipt", True)), parsed.get("reason", "")

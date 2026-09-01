@@ -38,6 +38,13 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     is_active: Mapped[bool] = mapped_column(default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow, nullable=False)
+    # Profil optionnel (ecran Profil du front) : jamais requis a l'inscription,
+    # l'utilisateur les renseigne ensuite s'il le souhaite. Voir src/db.py
+    # pour la migration idempotente qui ajoute ces colonnes a une base
+    # existante (create_all() ne modifie jamais une table deja creee).
+    full_name: Mapped[str | None] = mapped_column(String(255))
+    job_title: Mapped[str | None] = mapped_column(String(255))
+    company: Mapped[str | None] = mapped_column(String(255))
 
     corrections: Mapped[list["Correction"]] = relationship(
         back_populates="user", cascade="all, delete-orphan")

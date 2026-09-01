@@ -84,6 +84,15 @@ def png_bytes(size=(700, 500)):
     return buf.getvalue()
 
 
+def pdf_bytes():
+    """PDF minimal d'une page (rendue ensuite en image ~1650x2550px a 200
+    DPI, largement au-dessus du seuil de resolution)."""
+    import fitz
+    doc = fitz.open()
+    doc.new_page(width=595, height=842)  # A4
+    return doc.tobytes()
+
+
 # Menu Donut RÉEL sur la facture française (test_images/06_facture_francaise_design.webp)
 _FACTURE_MENU = {"menu": [
     {"nm": "Facture n 12345"}, {"nm": "CELIA NAUDIN"}, {"nm": "hello@reallygreatsite.com"},
@@ -440,6 +449,33 @@ def test_validate_ajoute_le_recu_a_cette_session():
     assert d["kpis"]["n_receipts"] == 1
 
 
+def test_limite_session_anonyme_bloque_au_dela_du_seuil(monkeypatch):
+    monkeypatch.setattr(api, "ANON_RECEIPT_LIMIT", 2)
+    sid = {"X-Session-Id": "anon-limit"}
+    payload = {"items": [], "subtotal": 100, "tax": None, "total": 100,
+              "category": "food", "country": "ID", "persist": True}
+
+    r1 = client.post("/api/validate", json=payload, headers=sid)
+    r2 = client.post("/api/validate", json=payload, headers=sid)
+    assert r1.status_code == 200 and r2.status_code == 200
+
+    r3 = client.post("/api/validate", json=payload, headers=sid)
+    assert r3.status_code == 403
+    body = r3.json()
+    assert body["success"] is False
+    assert "compte" in body["detail"].lower()
+
+
+def test_limite_session_anonyme_ignoree_en_mode_demo(monkeypatch):
+    monkeypatch.setattr(api, "ANON_RECEIPT_LIMIT", 2)
+    sid = {"X-Session-Id": "anon-limit-demo"}
+    client.post("/api/settings/demo", json={"enabled": True}, headers=sid)
+    payload = {"items": [], "subtotal": 100, "tax": None, "total": 100,
+              "category": "food", "country": "ID", "persist": True}
+    r = client.post("/api/validate", json=payload, headers=sid)
+    assert r.status_code == 200   # le corpus CORD (800 recus) ne compte pas
+
+
 def test_deux_sessions_sont_isolees():
     a, b = {"X-Session-Id": "sess-A"}, {"X-Session-Id": "sess-B"}
     payload = {"items": [], "subtotal": 1000, "tax": None, "total": 1000,
@@ -564,3 +600,74 @@ def test_extract_sans_modele_vision_ne_plante_pas(monkeypatch):
     assert body["success"] is True
     assert body["engine"] == "fallback_indisponible"            # engine indique l'indisponibilite
     assert "indisponible" in (body.get("fallback_note") or "").lower()
+
+
+# ---------------------------------------------------------------------------
+# Garde-fou hors-sujet : image qui n'est pas un recu/une facture -> rejet
+# AVANT Donut (voir src/llm.py:classify_is_receipt, api.py:_run_extraction_job)
+# ---------------------------------------------------------------------------
+def test_extract_image_hors_sujet_est_rejetee(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_env_key_abcdefgh")
+    monkeypatch.setattr(api, "classify_is_receipt",
+                        lambda *a, **k: (False, "Photo d'un chat, pas un reçu."))
+
+    def _boom(*a, **k):
+        raise AssertionError("Donut ne doit pas etre appele : rejet avant extraction")
+    monkeypatch.setattr(api, "get_donut", _boom)
+
+    r = _extract(files={"file": ("chat.png", png_bytes(), "image/png")},
+                 data={"country": "ID", "payment_mode": "cash"},
+                 headers={"X-Session-Id": "hors-sujet"})
+    assert r.status_code == 422
+    body = r.json()
+    assert body["success"] is False
+    assert "chat" in body["detail"].lower()
+    assert any("manuellement" in s.lower() for s in body["suggestions"])
+
+
+def test_extract_sans_cle_groq_ne_rejette_pas_hors_sujet(monkeypatch):
+    """Sans cle Groq, aucune classification possible : on ne bloque jamais
+    l'extraction sur cette base (repli sur le comportement Donut existant)."""
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setattr(api, "resolve_key", lambda provider="groq": (None, None))
+
+    def _boom(*a, **k):
+        raise AssertionError("classify_is_receipt ne doit pas etre appele sans cle")
+    monkeypatch.setattr(api, "classify_is_receipt", _boom)
+    monkeypatch.setattr(api, "get_donut", lambda: (None, None, "cpu"))
+    monkeypatch.setattr(api, "extract", lambda *a, **k: {"menu": [{"nm": "Eau", "price": "1000"}]})
+
+    r = _extract(files={"file": ("recu.png", png_bytes(), "image/png")},
+                 data={"country": "ID", "payment_mode": "cash"},
+                 headers={"X-Session-Id": "sans-cle"})
+    assert r.status_code == 200
+    assert r.json()["success"] is True
+
+
+# ---------------------------------------------------------------------------
+# Facture PDF : la 1ere page est rasterisee puis suit le MEME pipeline
+# qu'une photo (voir src/preprocess.py:pdf_first_page_to_image)
+# ---------------------------------------------------------------------------
+def test_extract_accepte_un_pdf(monkeypatch):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setattr(api, "resolve_key", lambda provider="groq": (None, None))
+    monkeypatch.setattr(api, "get_donut", lambda: (None, None, "cpu"))
+    monkeypatch.setattr(api, "extract",
+                        lambda *a, **k: {"menu": [{"nm": "Prestation", "price": "50000"}],
+                                         "total": {"total_price": "50000"}})
+
+    r = _extract(files={"file": ("facture.pdf", pdf_bytes(), "application/pdf")},
+                 data={"country": "ID", "payment_mode": "cash", "doc_type": "facture"},
+                 headers={"X-Session-Id": "pdf-facture"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["success"] is True
+    assert body["receipt"]["total"] == 50000
+
+
+def test_extract_pdf_corrompu_est_rejete():
+    r = _extract(files={"file": ("cassee.pdf", b"%PDF-1.4\nceci n'est pas un vrai pdf", "application/pdf")},
+                 data={"country": "ID", "payment_mode": "cash"},
+                 headers={"X-Session-Id": "pdf-corrompu"})
+    assert r.status_code == 422
+    assert r.json()["success"] is False

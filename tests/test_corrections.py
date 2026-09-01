@@ -19,6 +19,9 @@ def _user(email="u@x.com"):
 
 def test_pas_de_capture_sans_consentement():
     uid = _user()
+    # register_user() accorde le consentement par defaut (Tache 6) : on le
+    # retire explicitement pour tester le cas SANS consentement.
+    corrections.set_consent(uid, "training_data", False)
     result = corrections.record_correction(
         uid, None, {"total": 900}, {"total": 1000}, engine="donut", country="ID")
     assert result is None
@@ -55,10 +58,12 @@ def test_retrait_du_consentement():
     corrections.set_consent(uid, "training_data", False)
     assert corrections.has_consent(uid, "training_data") is False
     # le retrait est un NOUVEL enregistrement, l'historique du consentement
-    # initial n'est pas efface (journal append-only)
+    # initial n'est pas efface (journal append-only) -- 3 lignes : l'octroi
+    # par defaut a l'inscription (Tache 6), l'octroi explicite ci-dessus, le
+    # retrait.
     with db.get_db() as s:
         from src.models import Consent
-        assert s.query(Consent).filter_by(user_id=uid).count() == 2
+        assert s.query(Consent).filter_by(user_id=uid).count() == 3
     result = corrections.record_correction(uid, None, {"total": 1}, {"total": 2})
     assert result is None
 

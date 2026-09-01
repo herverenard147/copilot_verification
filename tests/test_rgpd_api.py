@@ -27,8 +27,9 @@ def test_export_sans_connexion():
 
 
 def test_export_contenu():
+    # register_user() accorde deja le consentement par defaut (Tache 6) --
+    # inutile de le poser explicitement, ca doublerait la ligne Consent.
     client.post("/api/auth/register", json={"email": "exp@x.com", "password": "motdepasse123"})
-    client.post("/api/auth/consent", json={"consent_type": "training_data", "granted": True})
     client.post("/api/validate", json={
         "items": [{"name": "Café", "quantity": 1, "unit_price": 1000, "line_price": 1000}],
         "subtotal": 1000, "total": 1000, "country": "CI", "persist": True,
@@ -61,8 +62,9 @@ def test_suppression_compte_mauvais_mot_de_passe():
 
 
 def test_suppression_compte_cascade():
+    # register_user() accorde deja le consentement par defaut (Tache 6) --
+    # inutile de le poser explicitement, ca doublerait la ligne Consent.
     client.post("/api/auth/register", json={"email": "gone@x.com", "password": "motdepasse123"})
-    client.post("/api/auth/consent", json={"consent_type": "training_data", "granted": True})
     client.post("/api/validate", json={
         "items": [], "subtotal": 1, "total": 1, "country": "CI", "persist": False,
         "raw_json": {"total": 0}, "engine": "donut",

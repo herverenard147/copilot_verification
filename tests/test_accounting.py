@@ -171,15 +171,15 @@ def test_3_modes_de_paiement_creditent_le_bon_compte():
 
 def test_vat_summary_agrege_recuperable_et_motifs():
     records = [
-        {"tax": 1800, "recoverable": 1800.0, "reason": "TVA recuperable — fournisseur identifie"},
-        {"tax": 2000, "recoverable": 0.0, "reason": "Fournisseur non identifie — TVA non recuperable"},
+        {"tax": 1800, "recoverable": 1800.0, "reason": "TVA recuperable, fournisseur identifie"},
+        {"tax": 2000, "recoverable": 0.0, "reason": "Fournisseur non identifie, TVA non recuperable"},
         {"tax": 0, "recoverable": 0.0, "reason": "Aucune TVA identifiee sur ce recu"},
     ]
     summary = vat_summary(records)
     assert summary["recoverable_total"] == 1800.0
     assert summary["non_recoverable_total"] == 2000.0
     assert summary["non_recoverable_count"] == 1
-    assert "Fournisseur non identifie — TVA non recuperable" in summary["non_recoverable_reasons"]
+    assert "Fournisseur non identifie, TVA non recuperable" in summary["non_recoverable_reasons"]
 
 
 @pytest.mark.parametrize("account,expected", [

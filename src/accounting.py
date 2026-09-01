@@ -131,10 +131,10 @@ def vat_recoverable(receipt, merchant=None):
     recuperable -> (0.0, motif explicite).
     """
     if not merchant:
-        return 0.0, "Fournisseur non identifie — TVA non recuperable"
+        return 0.0, "Fournisseur non identifie, TVA non recuperable"
     if not receipt.tax:
         return 0.0, "Aucune TVA identifiee sur ce recu"
-    return float(receipt.tax), "TVA recuperable — fournisseur identifie"
+    return float(receipt.tax), "TVA recuperable, fournisseur identifie"
 
 
 def _resolve_amounts(receipt):
@@ -158,7 +158,7 @@ def _resolve_amounts(receipt):
 def _charge_line(account, merchant_label, amount):
     return {
         "account": account,
-        "label": f"{CHART_OF_ACCOUNTS.get(account, 'Charge')} — {merchant_label}",
+        "label": f"{CHART_OF_ACCOUNTS.get(account, 'Charge')} : {merchant_label}",
         "debit": round(amount, 2),
         "credit": 0.0,
     }
@@ -260,7 +260,7 @@ def journal_entry(receipt, category, payment_mode="cash", country="CI", merchant
     if recoverable > 0:
         lines.append({
             "account": "4452",
-            "label": f"{CHART_OF_ACCOUNTS['4452']} — {merchant_label}",
+            "label": f"{CHART_OF_ACCOUNTS['4452']} : {merchant_label}",
             "debit": round(recoverable, 2),
             "credit": 0.0,
         })
@@ -272,7 +272,7 @@ def journal_entry(receipt, category, payment_mode="cash", country="CI", merchant
     credit_account = PAYMENT_ACCOUNTS[payment_mode]
     lines.append({
         "account": credit_account,
-        "label": f"{CHART_OF_ACCOUNTS[credit_account]} — {merchant_label}",
+        "label": f"{CHART_OF_ACCOUNTS[credit_account]} : {merchant_label}",
         "debit": 0.0,
         "credit": round(total_ttc, 2),
     })
@@ -301,10 +301,10 @@ def apply_account_overrides(entry, overrides):
         if line["debit"] > 0 and line["account"] != "4452":
             new_account = overrides.get(str(charge_i))
             if new_account and new_account in CHART_OF_ACCOUNTS and new_account != line["account"]:
-                parts = line["label"].split(" — ", 1)
+                parts = line["label"].split(" : ", 1)
                 merchant_label = parts[1] if len(parts) > 1 else "fournisseur non identifie"
                 line["account"] = new_account
-                line["label"] = f"{CHART_OF_ACCOUNTS[new_account]} — {merchant_label}"
+                line["label"] = f"{CHART_OF_ACCOUNTS[new_account]} : {merchant_label}"
                 line["manual"] = True
             charge_i += 1
     return entry

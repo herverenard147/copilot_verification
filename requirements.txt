@@ -36,6 +36,7 @@ google-genai>=0.3
 # Images + pretraitement (redressement, CLAHE)
 Pillow>=10.0
 opencv-python-headless>=4.9    # CLAHE + detection des bords (src/preprocess.py)
+PyMuPDF>=1.24                  # rasterise la 1ere page d'une facture PDF avant extraction (pas de poppler system requis)
 
 # Import d'ecritures/bilan externes (Excel/CSV/Word)
 openpyxl>=3.1                  # lecture .xlsx (pandas.read_excel)

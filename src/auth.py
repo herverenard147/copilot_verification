@@ -24,6 +24,7 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from src.db import get_db
 from src.models import User
+from src.corrections import set_consent
 
 _hasher = PasswordHasher()
 _FALLBACK_SECRET = os.urandom(32).hex()
@@ -143,7 +144,13 @@ def verify_user_password(user_id, password):
 def register_user(email, password):
     """Cree un compte. Leve ValueError (email invalide, deja pris, mot de
     passe trop court) plutot qu'une exception SQL brute -- message utilisable
-    tel quel par l'API."""
+    tel quel par l'API.
+
+    Consentement "amelioration du modele par mes corrections" ACCORDE PAR
+    DEFAUT a l'inscription (decision produit explicite) : le front DOIT
+    prevenir l'utilisateur immediatement apres l'inscription (popup dediee,
+    voir Connexion.jsx/App.jsx) avec un moyen immediat de le retirer -- ce
+    n'est jamais un defaut silencieux."""
     email = (email or "").strip().lower()
     if not email or "@" not in email or len(email) > MAX_EMAIL_LENGTH:
         raise ValueError("Email invalide.")
@@ -155,7 +162,46 @@ def register_user(email, password):
         user = User(email=email, password_hash=hash_password(password))
         s.add(user)
         s.flush()
-        return user.id
+        user_id = user.id
+    set_consent(user_id, "training_data", True)
+    return user_id
+
+
+MAX_PROFILE_FIELD_LENGTH = 255
+
+
+def get_profile(user_id):
+    """Email + champs de profil optionnels (nom, poste, entreprise) pour
+    l'ecran Profil. None si le compte n'existe pas/plus."""
+    with get_db() as s:
+        user = s.get(User, user_id)
+        if user is None:
+            return None
+        return {"email": user.email, "full_name": user.full_name,
+                "job_title": user.job_title, "company": user.company}
+
+
+def update_profile(user_id, full_name=None, job_title=None, company=None):
+    """Met a jour les champs de profil optionnels. Chaine vide -> NULL
+    (efface le champ) ; None -> champ inchange (permet une mise a jour
+    partielle depuis l'API sans ecraser les autres champs)."""
+    def _clean(v):
+        if v is None:
+            return None
+        v = v.strip()
+        if len(v) > MAX_PROFILE_FIELD_LENGTH:
+            raise ValueError(f"Ce champ dépasse {MAX_PROFILE_FIELD_LENGTH} caractères.")
+        return v or None
+    with get_db() as s:
+        user = s.get(User, user_id)
+        if user is None:
+            raise ValueError("Compte introuvable.")
+        if full_name is not None:
+            user.full_name = _clean(full_name)
+        if job_title is not None:
+            user.job_title = _clean(job_title)
+        if company is not None:
+            user.company = _clean(company)
 
 
 def authenticate(email, password):

@@ -82,10 +82,13 @@ const API = {
     + (country ? '?country=' + encodeURIComponent(country) : '')),
   updateReceipt: (id, payload) => putJSON('/api/receipt/' + encodeURIComponent(id), payload),
   deleteReceipt: (id) => del('/api/receipt/' + encodeURIComponent(id)),
-  accounting: (period, paymentMode, country) =>
-    getJSON('/api/accounting?' + new URLSearchParams({ period, payment_mode: paymentMode, country })),
+  accounting: (period, paymentMode, country, dateFrom, dateTo) => {
+    const params = { period, payment_mode: paymentMode, country };
+    if (dateFrom) params.date_from = dateFrom;
+    if (dateTo) params.date_to = dateTo;
+    return getJSON('/api/accounting?' + new URLSearchParams(params));
+  },
   search: (question) => postJSON('/api/search', { question }),
-  technical: () => getJSON('/api/technical'),
 
   keyStatus: () => getJSON('/api/settings/status'),
   setKey: (provider, key) => postJSON('/api/settings/apikey', { provider, key }),
@@ -102,6 +105,7 @@ const API = {
   login: (email, password) => postJSON('/api/auth/login', { email, password }),
   logout: () => postJSON('/api/auth/logout'),
   me: () => getJSON('/api/auth/me'),
+  updateProfile: (profile) => putJSON('/api/auth/profile', profile),
   getConsent: (consentType = 'training_data') =>
     getJSON('/api/auth/consent?consent_type=' + encodeURIComponent(consentType)),
   setConsent: (granted, consentType = 'training_data') =>

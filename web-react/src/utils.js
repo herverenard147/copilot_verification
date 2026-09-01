@@ -1,5 +1,5 @@
 export function money(v) {
-  if (v == null || (typeof v === "number" && isNaN(v))) return "—";
+  if (v == null || (typeof v === "number" && isNaN(v))) return "-";
   const n = Number(v);
   const decimals = Number.isInteger(n) ? 0 : 2;
   return n.toLocaleString("fr-FR", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });

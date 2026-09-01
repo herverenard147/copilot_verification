@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { money } from "../utils.js";
 import { receiptLabel, receiptStatus } from "../helpers.jsx";
+import { Icon } from "../Icons.jsx";
 
 export function ReceiptList({ receipts, title, filters, onOpen }) {
   const [filter, setFilter] = useState("all");
@@ -15,15 +16,15 @@ export function ReceiptList({ receipts, title, filters, onOpen }) {
 
   return (
     <div className="card">
-      <div className="section-head">
-        <span className="label-caps">{title} ({receipts.length})</span>
+      <div className="card-head">
+        <span className="card-head-label">{title} ({receipts.length})</span>
         <span className="muted body-sm">Cliquez une ligne pour voir le détail</span>
       </div>
       {filters && (
         <div className="filter-bar">
           <button className={`btn filter-btn${filter === "all" ? " active" : ""}`} onClick={() => setFilter("all")}>Tous ({total})</button>
-          <button className={`btn filter-btn${filter === "conforme" ? " active" : ""}`} onClick={() => setFilter("conforme")}>✓ Conformes ({total - review})</button>
-          <button className={`btn filter-btn${filter === "review" ? " active" : ""}`} onClick={() => setFilter("review")}>⚠️ À vérifier ({review})</button>
+          <button className={`btn filter-btn${filter === "conforme" ? " active" : ""}`} onClick={() => setFilter("conforme")}><Icon name="check" className="icon" style={{ width: 13, height: 13 }} />Conformes ({total - review})</button>
+          <button className={`btn filter-btn${filter === "review" ? " active" : ""}`} onClick={() => setFilter("review")}><Icon name="warn" className="icon" style={{ width: 13, height: 13 }} />À vérifier ({review})</button>
         </div>
       )}
       <table>
@@ -37,7 +38,7 @@ export function ReceiptList({ receipts, title, filters, onOpen }) {
               <tr key={r.receipt_id} className={`receipt-open ${st.rowClass}`}
                   title="Voir le détail du reçu" onClick={() => onOpen(r.receipt_id)}>
                 <td><b>{receiptLabel(r)}</b></td>
-                <td>{r.category || "—"}</td>
+                <td>{r.category || "-"}</td>
                 <td className="num">{r.n_items}</td>
                 <td className="num">{money(r.total)}</td>
                 <td>{st.badge}</td>
